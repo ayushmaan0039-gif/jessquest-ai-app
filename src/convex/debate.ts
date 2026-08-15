@@ -1,5 +1,5 @@
 /**
- * AI generation for MUN Apex AI — permanently bound to DeepSeek-V3.
+ * AI generation for MUN Apex AI — DeepSeek-V3, direct and permanent.
  *
  * Two entry points share ONE provider-call core (`generateText`):
  *
@@ -12,16 +12,17 @@
  * 2. `generateDebate` — the `/api/generate-debate` HTTP action, kept for
  *    non-React clients and direct API access. Streams a text/plain body.
  *
- * PROVIDER CHAIN:
+ * THE ONLY PROVIDER — DeepSeek-V3, direct:
  *
- *   1. DEEPSEEK-V3 (PRIMARY) — `DEEPSEEK_API_KEY`, official
- *      https://api.deepseek.com/chat/completions, model `deepseek-chat`
- *      (DeepSeek's production alias for DeepSeek-V3). Raw fetch + SSE
- *      streaming — no SDK.
- *   2. FREEBUFF GATEWAY (last resort) — `VLY_INTEGRATION_KEY` (the
- *      auto-injected deployment token). Note: the platform's gateway
- *      currently rejects this token (401), so generation without a
- *      DEEPSEEK_API_KEY will report that and explain what to add.
+ *   Endpoint : https://api.deepseek.com/chat/completions
+ *              (DeepSeek's official, permanent production endpoint — the
+ *              bare `deepseek.com` host serves the marketing site.)
+ *   Model    : `deepseek-chat` (DeepSeek's production alias for DeepSeek-V3)
+ *   Auth     : Bearer ${process.env.DEEPSEEK_API_KEY}
+ *
+ * No SDK, no wrapper functions, no intermediate proxy — one standard fetch()
+ * with raw SSE streaming. Set `DEEPSEEK_API_KEY` in the project Keys/API
+ * keys tab.
  *
  * The raw prompt plus the active Committee Mode and Experience Tier
  * selections are piped straight to the model. A strict persona is injected
@@ -44,8 +45,7 @@ import {
 
 /**
  * Canonical model identifiers. `deepseek-chat` is DeepSeek's production
- * alias for DeepSeek-V3 (what both the official DeepSeek API and OpenAI-
- * compatible gateways expect).
+ * alias for DeepSeek-V3 — what the official DeepSeek API expects.
  */
 const CANONICAL_MODELS = ["deepseek-chat"] as const;
 
@@ -61,24 +61,8 @@ const MODEL_BY_SKILL: Record<string, string> = {
   veteran: "deepseek-chat",
 };
 
-/** Official DeepSeek API (OpenAI-compatible). Model `deepseek-chat` = V3. */
+/** DeepSeek's official, permanent production endpoint (OpenAI-compatible). */
 const DEEPSEEK_API_BASE = "https://api.deepseek.com";
-
-/**
- * Resolves the Freebuff gateway base for chat completions. Honors
- * `VLY_INTEGRATION_BASE_URL` if the platform set it, otherwise falls back to
- * the exact base URL the `@vly-ai/integrations` SDK ships with
- * (https://integrations.vly.ai/v1/llm). `/v1/llm` is appended if missing so
- * both forms work.
- */
-function gatewayBase(): string {
-  const configured = process.env.VLY_INTEGRATION_BASE_URL?.trim();
-  if (configured) {
-    const base = configured.replace(/\/+$/, "");
-    return base.endsWith("/v1/llm") ? base : `${base}/v1/llm`;
-  }
-  return "https://integrations.vly.ai/v1/llm";
-}
 
 // ---------------------------------------------------------------------------
 // Strict personas per dropdown combination (Committee Mode × Experience Tier)
@@ -146,7 +130,7 @@ function buildSystemInstruction(
 }
 
 // ---------------------------------------------------------------------------
-// Streaming helpers (OpenAI-compatible SSE — used by DeepSeek and gateway)
+// Streaming helpers (DeepSeek uses OpenAI-compatible SSE)
 // ---------------------------------------------------------------------------
 
 /**
@@ -168,7 +152,7 @@ function extractStreamText(payload: unknown): string {
   return choice?.delta?.content ?? choice?.message?.content ?? "";
 }
 
-/** Parses the exact error body an OpenAI-compatible provider returns. */
+/** Parses the exact error body DeepSeek returns. */
 async function extractUpstreamError(upstream: Response): Promise<string> {
   try {
     const errorJson = (await upstream.json()) as {
@@ -223,80 +207,8 @@ async function consumeSse(
 }
 
 // ---------------------------------------------------------------------------
-// THE SHARED CORE — DeepSeek-V3 primary, Freebuff gateway last resort
+// THE CORE — one standard, direct fetch() to the DeepSeek production API
 // ---------------------------------------------------------------------------
-
-type ProviderName = "deepseek" | "gateway";
-
-type RequestSpec = {
-  name: ProviderName;
-  label: string;
-  url: string;
-  headers: Record<string, string>;
-  body: Record<string, unknown>;
-};
-
-function buildRequestSpec(
-  name: ProviderName,
-  label: string,
-  endpoint: string,
-  authToken: string,
-  model: string,
-  systemInstruction: string,
-  prompt: string,
-): RequestSpec {
-  return {
-    name,
-    label,
-    url: endpoint,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${authToken}`,
-    },
-    body: {
-      model,
-      messages: [
-        { role: "system", content: systemInstruction },
-        { role: "user", content: prompt },
-      ],
-      stream: true,
-      temperature: 0.7,
-    },
-  };
-}
-
-/** Executes one streaming request; throws a labelled error on failure. */
-async function streamFromSpec(
-  spec: RequestSpec,
-  onChunk?: (chunk: string) => void | Promise<unknown>,
-): Promise<string> {
-  let upstream: Response;
-  try {
-    upstream = await fetch(spec.url, {
-      method: "POST",
-      headers: spec.headers,
-      body: JSON.stringify(spec.body),
-      signal: AbortSignal.timeout(25000),
-    });
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Unknown network error";
-    throw new Error(`[${spec.label}] network request failed: ${message}`);
-  }
-
-  if (!upstream.ok) {
-    const detail = await extractUpstreamError(upstream);
-    throw new Error(
-      `${spec.label} request failed (${upstream.status}): ${detail}`,
-    );
-  }
-
-  if (!upstream.body) {
-    throw new Error(`The provider (${spec.label}) returned an empty stream.`);
-  }
-
-  return consumeSse(upstream.body, onChunk);
-}
 
 async function generateText(
   args: {
@@ -305,67 +217,53 @@ async function generateText(
     prompt: string;
   },
   onChunk?: (chunk: string) => void | Promise<unknown>,
-): Promise<{ text: string; provider: ProviderName }> {
-  const deepseekKey = process.env.DEEPSEEK_API_KEY;
-  const gatewayKey = process.env.VLY_INTEGRATION_KEY;
-
-  // Ordered provider chain: DeepSeek-V3 (primary) → Freebuff gateway (last
-  // resort, no key needed). Only providers with credentials are included.
-  const specs: RequestSpec[] = [];
-  if (deepseekKey) {
-    specs.push(
-      buildRequestSpec(
-        "deepseek",
-        "DeepSeek",
-        `${DEEPSEEK_API_BASE}/chat/completions`,
-        deepseekKey,
-        args.model,
-        args.systemInstruction,
-        args.prompt,
-      ),
-    );
-  }
-  if (gatewayKey) {
-    specs.push(
-      buildRequestSpec(
-        "gateway",
-        "Freebuff Gateway",
-        `${gatewayBase()}/chat/completions`,
-        gatewayKey,
-        args.model,
-        args.systemInstruction,
-        args.prompt,
-      ),
-    );
-  }
-
-  if (specs.length === 0) {
+): Promise<string> {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) {
     throw new Error(
-      "No AI provider is configured. Add a DEEPSEEK_API_KEY in the project Keys/API keys tab to arm the DeepSeek-V3 engine.",
+      "DEEPSEEK_API_KEY is not configured. Add it in the project Keys/API keys tab to arm the DeepSeek-V3 engine.",
     );
   }
 
-  let lastError: Error | null = null;
-  let lastAuthFailure = false;
+  const payload = {
+    model: args.model,
+    messages: [
+      { role: "system", content: args.systemInstruction },
+      { role: "user", content: args.prompt },
+    ],
+    stream: true,
+    temperature: 0.7,
+  };
 
-  for (const spec of specs) {
-    try {
-      const text = await streamFromSpec(spec, onChunk);
-      return { text, provider: spec.name };
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-      // Only move to the next provider on auth-style failures (bad/missing
-      // key, rejected token); other errors surface immediately.
-      lastAuthFailure = /request failed \((401|403)\)/.test(lastError.message);
-      if (!lastAuthFailure) break;
-    }
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${DEEPSEEK_API_BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(25000),
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown network error";
+    throw new Error(`[DeepSeek] network request failed: ${message}`);
   }
 
-  const hint =
-    lastAuthFailure && !deepseekKey
-      ? " Add a DEEPSEEK_API_KEY in the project Keys/API keys tab to arm the DeepSeek-V3 engine (the Freebuff gateway token is currently rejected by the platform)."
-      : "";
-  throw new Error(`${lastError?.message ?? "Generation failed."}${hint}`);
+  // Error safety net: surface DeepSeek's exact error message verbatim on the
+  // dashboard console — never a generic 401/404 block.
+  if (!upstream.ok) {
+    const detail = await extractUpstreamError(upstream);
+    throw new Error(`DeepSeek request failed (${upstream.status}): ${detail}`);
+  }
+
+  if (!upstream.body) {
+    throw new Error("The DeepSeek API returned an empty stream.");
+  }
+
+  return consumeSse(upstream.body, onChunk);
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +313,7 @@ export const generateStrategicContent = action({
 
     let full = "";
     try {
-      const result = await generateText(
+      const text = await generateText(
         { model, systemInstruction, prompt },
         (chunk) => {
           full += chunk;
@@ -425,7 +323,7 @@ export const generateStrategicContent = action({
           });
         },
       );
-      return { text: result.text, model, provider: result.provider };
+      return { text, model, provider: "deepseek" };
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Generation failed.";
