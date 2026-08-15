@@ -1,12 +1,13 @@
 /**
  * `/api/generate-debate` — server-side Gemini streaming endpoint.
  *
- * Reads the API key from the environment:
- *   process.env.GEMINI_API_KEY
+ * Reads the API key from the environment (in order of preference):
+ *   process.env.VITE_GEMINI_API_KEY
+ *   process.env.GEMINI_API_KEY          (fallback)
  *
- * Set it in Freebuff → project Keys/API keys tab under the name
- * `GEMINI_API_KEY` (hand-edited `.env` files do not reach the runtime).
- * The model used is `gemini-1.5-pro`.
+ * Set `VITE_GEMINI_API_KEY` in Freebuff → project Keys/API keys tab.
+ * The model used is `gemini-1.5-pro`, streaming tokens as they are
+ * generated back to the chat capsule.
  *
  * Request body (JSON):
  *   {
@@ -16,8 +17,12 @@
  *     prompt: string
  *   }
  *
- * Response: a text/plain streaming body of generated content, with CORS
- * headers so the dashboard can consume it from the browser.
+ * The raw prompt plus the active Committee Mode and Experience Tier
+ * selections are piped straight to Google, with a strict persona injected
+ * per committee × skill combination (see PERSONAS below).
+ *
+ * Response: a text/plain streaming body, with CORS headers so the
+ * dashboard can consume it from the browser.
  */
 import { GoogleGenAI } from "@google/genai";
 import { httpAction } from "./_generated/server";
@@ -25,21 +30,27 @@ import { httpAction } from "./_generated/server";
 const MODEL = "gemini-1.5-pro";
 
 // ---------------------------------------------------------------------------
-// System-instruction building blocks, driven by the header dropdown state
+// Strict personas per dropdown combination (Committee Mode × Experience Tier)
 // ---------------------------------------------------------------------------
 
-const COMMITTEE_INSTRUCTIONS: Record<string, string> = {
-  un: "Committee framework: United Nations (UN Committees). Formal General Assembly protocol — 'Honourable Chair, distinguished delegates', diplomatic register, bloc politics, consensus language, and UN-style resolution drafting conventions.",
-  loksabha: "Committee framework: Lok Sabha (Indian Parliament). Rules of Procedure and Question Hour — 'Honourable Speaker, through you…', parliamentary decorum, constitutional rather than personal attacks, and Indian political figures, ministries, and policy vocabulary.",
-  aippm: "Committee framework: AIPPM (All India Political Parties Meet). Coalition arithmetic and consensus building — party positioning, national-interest framing, addressing other parties as allies or opponents, and common-minimum-programme style language.",
+const PERSONAS: Record<string, string> = {
+  "un:beginner":
+    "Persona: an encouraging MUN coach. Output full verbatim speech scripts with PHONETIC PACING GUIDES — mark pauses as (pause), add breath marks like (breathe), emphasise key phrases in CAPITALS, and annotate timing brackets such as [0:00–0:15]. Explain General Assembly protocol gently as you go, keep the delegate confident, and always close with one concrete improvement for next time.",
+  "un:veteran":
+    "Persona: an elite UN diplomat's advisor. Assume complete mastery of GA/UNSC protocol and diplomatic register. Write in precise, quotable language, cite Charter articles and UNSC/GA resolutions where they strengthen the argument, game out bloc positions before they are raised, and pre-empt the POI inside the speech itself.",
+  "loksabha:beginner":
+    "Persona: an encouraging Lok Sabha coach. Output full verbatim speech scripts with PHONETIC PACING GUIDES — pauses (pause), breath marks (breathe), CAPITALS emphasis, and timing brackets [0:00–0:15]. Teach the Rules of Procedure warmly ('Honourable Speaker, through you…'), correct gently, and always end with one concrete improvement.",
+  "loksabha:veteran":
+    "Persona: an elite parliamentary advisor to a seasoned Member of Parliament. Generate complex TRAP CROSS-EXAMINATIONS that corner the opposite bench, deploy Rule 376/377 procedures for urgent public importance and special mentions, and craft intense debate rhetoric grounded in the Rules of Procedure and constitutional argument. Assume the MP is fluent in the House.",
+  "aippm:beginner":
+    "Persona: an encouraging AIPPM coach. Output full verbatim speech scripts with PHONETIC PACING GUIDES — pauses (pause), breath marks (breathe), CAPITALS emphasis, timing brackets [0:00–0:15]. Teach coalition basics and party positioning kindly, correct gently, and always close with one concrete improvement.",
+  "aippm:veteran":
+    "Persona: an elite political strategist for an AIPPM party chief. Produce coalition-arithmetic-aware positioning, complex TRAP CROSS-EXAMINATIONS of rival party spokespersons, and intense rhetoric that frames every exchange in national interest while weaponising the common minimum programme. Assume deep fluency in Indian politics.",
 };
 
-const SKILL_INSTRUCTIONS: Record<string, string> = {
-  beginner:
-    "Skill track: Beginner. Prioritise clarity, structure, and confidence. Aim for roughly 140 words / 90 seconds of speaking time. Keep protocol implicit but correct, avoid unexplained jargon, and produce something a first-time delegate can deliver cleanly.",
-  veteran:
-    "Skill track: Veteran. Assume fluency in procedure and politics. Aim for roughly 420 words / 4 minutes of speaking time. Reward rhetorical precision, legal and political depth, rapid-rebuttal instincts, and tactical drafting. Do not oversimplify.",
-};
+// ---------------------------------------------------------------------------
+// Mode-specific drafting instructions (which module the request came from)
+// ---------------------------------------------------------------------------
 
 const MODE_INSTRUCTIONS: Record<string, string> = {
   interventions:
@@ -87,11 +98,12 @@ export const generateDebate = httpAction(async (_ctx, request) => {
     return jsonResponse(405, { error: "Method not allowed. Use POST." });
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey =
+    process.env.VITE_GEMINI_API_KEY ?? process.env.GEMINI_API_KEY;
   if (!apiKey) {
     return jsonResponse(500, {
       error:
-        "GEMINI_API_KEY is not configured. Add it in the project Keys/API keys tab.",
+        "VITE_GEMINI_API_KEY is not configured. Add it in the project Keys/API keys tab.",
     });
   }
 
@@ -120,17 +132,18 @@ export const generateDebate = httpAction(async (_ctx, request) => {
   if (!(mode in MODE_INSTRUCTIONS)) {
     return jsonResponse(400, { error: `Unknown mode: ${mode}` });
   }
-  if (!(committee in COMMITTEE_INSTRUCTIONS)) {
+  if (!(committee in ["un", "loksabha", "aippm"])) {
     return jsonResponse(400, { error: `Unknown committee: ${committee}` });
   }
-  if (!(skill in SKILL_INSTRUCTIONS)) {
+  if (!(skill in ["beginner", "veteran"])) {
     return jsonResponse(400, { error: `Unknown skill: ${skill}` });
   }
 
+  const persona = PERSONAS[`${committee}:${skill}`] ?? PERSONAS["un:beginner"];
+
   const systemInstruction = [
-    "You are MUN Apex AI, the in-chamber drafting assistant inside a premium debate dashboard.",
-    COMMITTEE_INSTRUCTIONS[committee],
-    SKILL_INSTRUCTIONS[skill],
+    "You are MUN Apex AI, the in-chamber drafting assistant inside a premium debate dashboard. You are running a live conversational loop for one delegate.",
+    persona,
     MODE_INSTRUCTIONS[mode],
     OUTPUT_FORMATS[mode],
     "Respond with only the requested content — no preamble, no commentary, no markdown headers.",
