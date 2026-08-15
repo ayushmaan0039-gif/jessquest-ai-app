@@ -1,5 +1,5 @@
 /**
- * DeepSeek-V3 generation for MUN Apex AI.
+ * AI generation for MUN Apex AI.
  *
  * Two entry points share ONE provider-call core (`generateText`):
  *
@@ -12,23 +12,21 @@
  * 2. `generateDebate` — the `/api/generate-debate` HTTP action, kept for
  *    non-React clients and direct API access. Streams a text/plain body.
  *
- * No external AI SDK and no external API key of any kind. Generation flows
- * through Freebuff's native, built-in AI gateway — the same endpoint the
- * `@vly-ai/integrations` SDK targets — authenticated with the deployment
- * token injected automatically during project creation:
+ * PROVIDER CHAIN (first available credential wins, then automatic fallback
+ * when a provider rejects the request with an auth error):
  *
- *   process.env.VLY_INTEGRATION_KEY       (auto-set, format `sk_*`)
- *   process.env.VLY_INTEGRATION_BASE_URL  (optional override; default is the
- *   gateway base the SDK ships with, https://integrations.vly.ai/v1/llm)
+ *   1. GEMINI (primary)   — `VITE_GEMINI_API_KEY` (or `GEMINI_API_KEY`),
+ *      model `gemini-2.0-flash`, raw fetch to Google's official
+ *      `:streamGenerateContent?alt=sse` endpoint. NOTE: Google only accepts
+ *      AI Studio API keys (AIza…) — OAuth-style `AQ.` tokens are rejected.
+ *   2. DEEPSEEK (fallback) — `DEEPSEEK_API_KEY`, official
+ *      https://api.deepseek.com, model `deepseek-chat` (DeepSeek-V3).
+ *   3. FREEBUFF GATEWAY — `VLY_INTEGRATION_KEY` (auto-injected deployment
+ *      token; note the platform's gateway currently rejects this token).
  *
- * If the gateway rejects the deployment token (platform provisioning issue),
- * the core automatically falls back to DeepSeek's OFFICIAL API
- * (https://api.deepseek.com, model `deepseek-chat` = DeepSeek-V3) when
- * `DEEPSEEK_API_KEY` is configured in the project Keys/API keys tab.
- * Neither path reads any external key-prefix environment variable.
- *
- * Both paths inject the strict persona built from the active dropdown state
- * (Committee Mode × Experience Tier):
+ * The raw prompt plus the active Committee Mode and Experience Tier
+ * selections are piped straight to the model. A strict persona is injected
+ * server-side per committee × skill combination (see PERSONAS below):
  *   - UN + Beginner        → encouraging MUN coach, verbatim speech scripts
  *                            with phonetic pacing cues.
  *   - Lok Sabha/AIPPM + Veteran → elite parliamentary advisor, complex trap
@@ -46,23 +44,25 @@ import {
 } from "./shared";
 
 /**
- * Canonical DeepSeek model identifiers. `deepseek-chat` is DeepSeek's
- * production alias for DeepSeek-V3 (the identifier both DeepSeek's official
- * API and the gateway expect).
+ * Canonical production model strings, synchronized with the Experience Tier
+ * toggle. The user-facing loop runs on `gemini-2.0-flash`; DeepSeek-V3
+ * (`deepseek-chat`) is used when the fallback engine takes over.
  */
-const CANONICAL_MODELS = ["deepseek-chat"] as const;
+const CANONICAL_MODELS = ["gemini-2.0-flash", "deepseek-chat"] as const;
 
 /** Valid dropdown values, used for strict request validation (must match
  *  `CommitteeFramework` / `SkillLevel` in `src/convex/shared.ts`). */
 const COMMITTEES = ["un", "loksabha", "aippm"] as const;
 const SKILLS = ["beginner", "veteran"] as const;
 
-/** Model chosen per Experience Tier (both resolve to DeepSeek-V3 — one
- *  engine, tuned by the persona matrix instead). */
+/** Model chosen per Experience Tier — both run the `gemini-2.0-flash` loop. */
 const MODEL_BY_SKILL: Record<string, string> = {
-  beginner: "deepseek-chat",
-  veteran: "deepseek-chat",
+  beginner: "gemini-2.0-flash",
+  veteran: "gemini-2.0-flash",
 };
+
+/** Google's global generative language endpoint. */
+const GEMINI_API_BASE = "https://generativelanguage.googleapis.com";
 
 /** Official DeepSeek API (OpenAI-compatible). Model `deepseek-chat` = V3. */
 const DEEPSEEK_API_BASE = "https://api.deepseek.com";
@@ -129,7 +129,7 @@ function resolveModel(skill: string, requested?: string): string {
   if (requested && CANONICAL_MODELS.includes(requested as never)) {
     return requested;
   }
-  return MODEL_BY_SKILL[skill] ?? "deepseek-chat";
+  return MODEL_BY_SKILL[skill] ?? "gemini-2.0-flash";
 }
 
 /** Builds the strict system instruction for the selected chamber × tier. */
@@ -148,12 +148,35 @@ function buildSystemInstruction(
   ].join("\n\n");
 }
 
+// ---------------------------------------------------------------------------
+// Frame extractors (per provider's streaming JSON shape)
+// ---------------------------------------------------------------------------
+
+/** Gemini frames: `candidates[0].content.parts[].text` (or top-level text). */
+function extractGeminiText(payload: unknown): string {
+  if (typeof payload !== "object" || payload === null) return "";
+  const data = payload as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    text?: string;
+  };
+  const candidates = data.candidates;
+  if (Array.isArray(candidates)) {
+    const parts = candidates[0]?.content?.parts;
+    if (Array.isArray(parts)) {
+      return parts
+        .map((part) => (typeof part?.text === "string" ? part.text : ""))
+        .join("");
+    }
+  }
+  return typeof data.text === "string" ? data.text : "";
+}
+
 /**
- * Pulls the incremental text out of an OpenAI-compatible streaming frame:
+ * OpenAI-compatible frames (DeepSeek, gateway):
  * `choices[0].delta.content` for stream chunks, `choices[0].message.content`
  * for non-streamed fallbacks.
  */
-function extractStreamText(payload: unknown): string {
+function extractOpenAiText(payload: unknown): string {
   if (typeof payload !== "object" || payload === null) return "";
   const data = payload as {
     choices?: Array<{
@@ -183,9 +206,107 @@ async function extractUpstreamError(upstream: Response): Promise<string> {
   }
 }
 
-/** Consumes an OpenAI-compatible SSE stream, yielding incremental text. */
+// ---------------------------------------------------------------------------
+// Request specs per provider
+// ---------------------------------------------------------------------------
+
+type ProviderName = "gemini" | "deepseek" | "gateway";
+
+type RequestSpec = {
+  name: ProviderName;
+  label: string;
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+  extractFrame: (payload: unknown) => string;
+};
+
+function buildGeminiSpec(
+  model: string,
+  systemInstruction: string,
+  prompt: string,
+  apiKey: string,
+): RequestSpec {
+  return {
+    name: "gemini",
+    label: "Gemini",
+    url:
+      `${GEMINI_API_BASE}/v1beta/models/${model}:streamGenerateContent` +
+      `?alt=sse&key=${encodeURIComponent(apiKey)}`,
+    headers: { "Content-Type": "application/json" },
+    body: {
+      contents: [{ parts: [{ text: prompt }] }],
+      systemInstruction: { parts: [{ text: systemInstruction }] },
+    },
+    extractFrame: extractGeminiText,
+  };
+}
+
+function buildOpenAiSpec(
+  name: ProviderName,
+  label: string,
+  endpoint: string,
+  authToken: string,
+  model: string,
+  systemInstruction: string,
+  prompt: string,
+): RequestSpec {
+  return {
+    name,
+    label,
+    url: endpoint,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${authToken}`,
+    },
+    body: {
+      model,
+      messages: [
+        { role: "system", content: systemInstruction },
+        { role: "user", content: prompt },
+      ],
+      stream: true,
+      temperature: 0.7,
+    },
+    extractFrame: extractOpenAiText,
+  };
+}
+
+/** Executes one streaming request; throws a labelled error on failure. */
+async function streamFromSpec(
+  spec: RequestSpec,
+  onChunk?: (chunk: string) => void | Promise<unknown>,
+): Promise<string> {
+  let upstream: Response;
+  try {
+    upstream = await fetch(spec.url, {
+      method: "POST",
+      headers: spec.headers,
+      body: JSON.stringify(spec.body),
+      signal: AbortSignal.timeout(25000),
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown network error";
+    throw new Error(`[${spec.label}] network request failed: ${message}`);
+  }
+
+  if (!upstream.ok) {
+    const detail = await extractUpstreamError(upstream);
+    throw new Error(`${spec.label} request failed (${upstream.status}): ${detail}`);
+  }
+
+  if (!upstream.body) {
+    throw new Error(`The provider (${spec.label}) returned an empty stream.`);
+  }
+
+  return consumeSse(upstream.body, spec.extractFrame, onChunk);
+}
+
+/** Consumes an SSE stream, yielding incremental text via the frame extractor. */
 async function consumeSse(
   upstream: ReadableStream<Uint8Array>,
+  extractFrame: (payload: unknown) => string,
   onChunk?: (chunk: string) => void | Promise<unknown>,
 ): Promise<string> {
   const reader = upstream.getReader();
@@ -208,7 +329,7 @@ async function consumeSse(
       if (!frame || frame === "[DONE]") continue;
 
       try {
-        const text = extractStreamText(JSON.parse(frame));
+        const text = extractFrame(JSON.parse(frame));
         if (text) {
           full += text;
           await onChunk?.(text);
@@ -221,45 +342,8 @@ async function consumeSse(
   return full;
 }
 
-/** Executes one streaming chat-completions request against an endpoint. */
-async function streamFromEndpoint(
-  endpoint: string,
-  authToken: string,
-  payload: Record<string, unknown>,
-  provider: "gateway" | "deepseek-api",
-  onChunk?: (chunk: string) => void | Promise<unknown>,
-): Promise<string> {
-  let upstream: Response;
-  try {
-    upstream = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${authToken}`,
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(25000),
-    });
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Unknown network error";
-    throw new Error(`[${provider}] network request failed: ${message}`);
-  }
-
-  if (!upstream.ok) {
-    const detail = await extractUpstreamError(upstream);
-    throw new Error(`DeepSeek request failed (${upstream.status}): ${detail}`);
-  }
-
-  if (!upstream.body) {
-    throw new Error(`The provider (${provider}) returned an empty stream.`);
-  }
-
-  return consumeSse(upstream.body, onChunk);
-}
-
 // ---------------------------------------------------------------------------
-// THE SHARED CORE — provider selection + gateway → official API fallback
+// THE SHARED CORE — provider chain + automatic fallback
 // ---------------------------------------------------------------------------
 
 async function generateText(
@@ -269,74 +353,75 @@ async function generateText(
     prompt: string;
   },
   onChunk?: (chunk: string) => void | Promise<unknown>,
-): Promise<{ text: string; provider: "gateway" | "deepseek-api" }> {
-  const gatewayKey = process.env.VLY_INTEGRATION_KEY;
+): Promise<{ text: string; provider: ProviderName }> {
+  const geminiKey =
+    process.env.VITE_GEMINI_API_KEY ?? process.env.GEMINI_API_KEY;
   const deepseekKey = process.env.DEEPSEEK_API_KEY;
+  const gatewayKey = process.env.VLY_INTEGRATION_KEY;
 
-  const payload = {
-    model: args.model,
-    messages: [
-      { role: "system", content: args.systemInstruction },
-      { role: "user", content: args.prompt },
-    ],
-    stream: true,
-    temperature: 0.7,
-  };
-
-  let provider: "gateway" | "deepseek-api";
-  let endpoint: string;
-  let authToken: string;
-  if (gatewayKey) {
-    provider = "gateway";
-    endpoint = `${gatewayBase()}/chat/completions`;
-    authToken = gatewayKey;
-  } else if (deepseekKey) {
-    provider = "deepseek-api";
-    endpoint = `${DEEPSEEK_API_BASE}/chat/completions`;
-    authToken = deepseekKey;
-  } else {
-    throw new Error(
-      "No AI provider is configured. The Freebuff gateway token (VLY_INTEGRATION_KEY) is missing — add a DEEPSEEK_API_KEY in the project Keys/API keys tab as an alternative.",
+  // Build the ordered provider chain from whatever credentials exist.
+  const specs: RequestSpec[] = [];
+  if (geminiKey) {
+    specs.push(
+      buildGeminiSpec(args.model, args.systemInstruction, args.prompt, geminiKey),
     );
   }
-
-  try {
-    const text = await streamFromEndpoint(
-      endpoint,
-      authToken,
-      payload,
-      provider,
-      onChunk,
-    );
-    return { text, provider };
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : String(error);
-
-    // Automatic fallback: the gateway rejected the deployment token (a
-    // platform provisioning issue), but an official DeepSeek API key is
-    // available — retry against DeepSeek's API with the same payload.
-    if (
-      provider === "gateway" &&
-      deepseekKey &&
-      /request failed \((401|403)\)/.test(message)
-    ) {
-      const text = await streamFromEndpoint(
+  if (deepseekKey) {
+    specs.push(
+      buildOpenAiSpec(
+        "deepseek",
+        "DeepSeek",
         `${DEEPSEEK_API_BASE}/chat/completions`,
         deepseekKey,
-        payload,
-        "deepseek-api",
-        onChunk,
-      );
-      return { text, provider: "deepseek-api" };
-    }
-
-    const hint =
-      provider === "gateway"
-        ? " The Freebuff gateway rejected the deployment token (platform provisioning issue). Add a DEEPSEEK_API_KEY in the project Keys/API keys tab to use the official DeepSeek-V3 API instead."
-        : "";
-    throw new Error(`${message}${hint}`);
+        "deepseek-chat",
+        args.systemInstruction,
+        args.prompt,
+      ),
+    );
   }
+  if (gatewayKey) {
+    specs.push(
+      buildOpenAiSpec(
+        "gateway",
+        "Freebuff Gateway",
+        `${gatewayBase()}/chat/completions`,
+        gatewayKey,
+        args.model,
+        args.systemInstruction,
+        args.prompt,
+      ),
+    );
+  }
+
+  if (specs.length === 0) {
+    throw new Error(
+      "No AI provider is configured. Add a VITE_GEMINI_API_KEY (AI Studio, AIza…) or a DEEPSEEK_API_KEY in the project Keys/API keys tab.",
+    );
+  }
+
+  let lastError: Error | null = null;
+  let lastAuthFailure = false;
+
+  for (const spec of specs) {
+    try {
+      const text = await streamFromSpec(spec, onChunk);
+      return { text, provider: spec.name };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      lastAuthFailure = /request failed \((401|403)\)|UNAUTHENTICATED|invalid authentication|API key not valid|ACCESS_TOKEN_TYPE_UNSUPPORTED|API_KEY_SERVICE_BLOCKED/i.test(
+        lastError.message,
+      );
+      // Only move to the next provider on auth-style failures; other errors
+      // (network, model-not-found, rate limits) should surface immediately.
+      if (!lastAuthFailure) break;
+    }
+  }
+
+  const hint =
+    lastAuthFailure && specs.some((spec) => spec.name === "gemini")
+      ? " Google only accepts AI Studio API keys (AIza…) — OAuth-style AQ. tokens are rejected. Add a valid VITE_GEMINI_API_KEY, or a DEEPSEEK_API_KEY to run the fallback engine."
+      : "";
+  throw new Error(`${lastError?.message ?? "Generation failed."}${hint}`);
 }
 
 // ---------------------------------------------------------------------------
