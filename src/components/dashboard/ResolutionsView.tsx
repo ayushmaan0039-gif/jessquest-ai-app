@@ -27,6 +27,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { DebateConsole } from "@/components/dashboard/DebateConsole";
+import { parseResolutionOutput } from "@/lib/gemini";
 import {
   COMMITTEES,
   PHRASE_BANKS,
@@ -509,6 +511,55 @@ export function ResolutionsView({
                 </div>
                 );
               })}
+
+              {/* AI console — streams generated clauses into the draft */}
+              <DebateConsole
+                mode="resolutions"
+                committee={committee}
+                skill={skill}
+                generateLabel="Draft clauses"
+                placeholder={`Topic or focus — e.g. '${
+                  RESOLUTION_STARTERS[committee].topic
+                }'`}
+              >
+                {({ text: generated, isStreaming }) => {
+                  const parsed = parseResolutionOutput(generated);
+                  const clauseCount =
+                    (parsed?.preamble.length ?? 0) +
+                    (parsed?.operative.length ?? 0);
+                  return (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="rounded-sm border-border bg-card text-[11px] font-semibold"
+                      disabled={!clauseCount || isStreaming}
+                      onClick={() => {
+                        if (!parsed) return;
+                        setPreamble((current) => [
+                          ...current,
+                          ...parsed.preamble.map((clause) => ({
+                            id: uid(),
+                            text: clause,
+                          })),
+                        ]);
+                        setOperative((current) => [
+                          ...current,
+                          ...parsed.operative.map((clause) => ({
+                            id: uid(),
+                            text: clause,
+                          })),
+                        ]);
+                        toast.success(
+                          `Appended ${parsed.preamble.length} preambulatory and ${parsed.operative.length} operative clauses.`,
+                        );
+                      }}
+                    >
+                      <Plus className="size-3.5" />
+                      Append clauses to draft
+                    </Button>
+                  );
+                }}
+              </DebateConsole>
 
               {/* Actions */}
               <div className="flex items-center gap-2">

@@ -28,6 +28,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { DebateConsole } from "@/components/dashboard/DebateConsole";
 import {
   COMMITTEES,
   FLOOR_FEED,
@@ -525,6 +526,31 @@ export function InterventionsView({
               ))}
             </ul>
           </div>
+
+          {/* AI console — streams a generated intervention into the draft desk */}
+          <DebateConsole
+            mode="interventions"
+            committee={committee}
+            skill={skill}
+            generateLabel="Draft"
+            placeholder={`Describe the ${type.toLowerCase()} you need — topic, position, or the counter you expect…`}
+          >
+            {({ text: generated, isStreaming }) => (
+              <Button
+                size="sm"
+                variant="outline"
+                className="rounded-sm border-border bg-card text-[11px] font-semibold"
+                disabled={!generated || isStreaming}
+                onClick={() => {
+                  setBody(generated);
+                  toast.success("Generated text moved into the draft desk.");
+                }}
+              >
+                <PenLine className="size-3.5" />
+                Use in draft
+              </Button>
+            )}
+          </DebateConsole>
         </section>
       </div>
     </div>

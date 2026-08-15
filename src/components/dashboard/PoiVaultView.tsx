@@ -33,6 +33,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { DebateConsole } from "@/components/dashboard/DebateConsole";
+import { parsePoiOutput } from "@/lib/gemini";
 import {
   CATEGORY_LABELS,
   COMMITTEES,
@@ -102,9 +104,10 @@ export function PoiVaultView({
 
   const handleCopy = async (question: string, response: string) => {
     try {
-      await navigator.clipboard.writeText(
-        `Q: ${question}\nA: ${response}`,
-      );
+      const text = response
+        ? `Q: ${question}\nA: ${response}`
+        : question;
+      await navigator.clipboard.writeText(text);
       toast.success("Copied to the clipboard — strike when the chair calls.");
     } catch {
       toast.error("Clipboard unavailable in this browser.");
@@ -213,6 +216,56 @@ export function PoiVaultView({
           {total} entry{total === 1 ? "" : "s"}
         </span>
       </div>
+
+      {/* AI console — streams a generated Q&A into the vault */}
+      <DebateConsole
+        mode="poiVault"
+        committee={committee}
+        skill={skill}
+        generateLabel="Compose"
+        placeholder="Aim at the opposing delegation's weak point — e.g. 'China's climate finance pledge'"
+      >
+        {({ text: generated, isStreaming, clear }) => {
+          const parsed = parsePoiOutput(generated);
+          return (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                className="rounded-sm border-border bg-card text-[11px] font-semibold"
+                disabled={!generated || isStreaming}
+                onClick={() =>
+                  handleCopy(
+                    parsed?.question ?? generated,
+                    parsed?.response ?? "",
+                  )
+                }
+              >
+                <Copy className="size-3.5" />
+                Copy
+              </Button>
+              <Button
+                size="sm"
+                className="rounded-sm bg-primary text-[11px] font-bold uppercase tracking-[0.1em] text-primary-foreground hover:bg-primary/90"
+                disabled={!parsed || isStreaming}
+                onClick={() => {
+                  if (!parsed) return;
+                  setNewCategory(parsed.question.toLowerCase().includes("cross")
+                    ? "cross_exam"
+                    : "poi");
+                  setNewQuestion(parsed.question);
+                  setNewResponse(parsed.response);
+                  setDialogOpen(true);
+                  clear();
+                }}
+              >
+                <Plus className="size-3.5" />
+                File to vault
+              </Button>
+            </>
+          );
+        }}
+      </DebateConsole>
 
       {/* Entries */}
       <div className="grid gap-4 md:grid-cols-2">
