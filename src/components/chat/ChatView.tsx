@@ -1,10 +1,8 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
-import { useMutation, useQuery } from "convex/react";
+import { useAction, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type {
   CommitteeFramework,
@@ -13,7 +11,7 @@ import type {
 } from "@/convex/shared";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatMessage } from "@/components/chat/ChatMessage";
-import { detectMode, streamGenerateDebate } from "@/lib/deepseek";
+import { detectMode } from "@/lib/deepseek";
 import { COMMITTEES, SKILLS } from "@/components/dashboard/data";
 
 const SUGGESTIONS = [
@@ -36,35 +34,25 @@ export function ChatView({
   skill: SkillLevel;
 }) {
   const messages = useQuery(api.chat.list);
-  const insertMessage = useMutation(api.chat.insert);
+  const generateStrategicContent = useAction(
+    api.debate.generateStrategicContent,
+  );
 
   const [prompt, setPrompt] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
-  const [live, setLive] = useState<{
-    mode: DebateMode;
-    text: string;
-  } | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
-  const streamRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, live]);
+  }, [messages, isStreaming]);
 
-  // Wipe any cached error banner / live stream out of the DOM memory when the
-  // dropdown track changes, so the next payload streams fresh.
+  // Wipe any cached error banner out of the DOM memory when the dropdown
+  // track changes, so the next submission streams fresh.
   useEffect(() => {
-    streamRef.current?.abort();
-    setLive(null);
-    setIsStreaming(false);
     setStreamError(null);
+    setIsStreaming(false);
   }, [committee, skill]);
-
-  // Abort any in-flight stream if the chat view unmounts.
-  useEffect(() => {
-    return () => streamRef.current?.abort();
-  }, []);
 
   const send = useCallback(
     async (raw: string) => {
@@ -77,60 +65,28 @@ export function ChatView({
       setPrompt("");
 
       try {
-        await insertMessage({
-          role: "user",
-          content: text,
+        // Straight to the Convex backend — no browser fetch, no HTTP route.
+        // The action persists the prompt, creates the assistant message, and
+        // streams tokens into it via reactive patches.
+        await generateStrategicContent({
           mode,
-          committeeFramework: committee,
-          skillLevel: skill,
+          committee,
+          skill,
+          prompt: text,
         });
-      } catch {
-        toast.error("Could not save your prompt.");
-      }
-
-      const controller = new AbortController();
-      streamRef.current = controller;
-      setLive({ mode, text: "" });
-
-      let full = "";
-      try {
-        for await (const chunk of streamGenerateDebate(
-          { mode, committee, skill, prompt: text },
-          controller.signal,
-        )) {
-          full += chunk;
-          setLive({ mode, text: full });
-        }
-        if (full.trim()) {
-          await insertMessage({
-            role: "assistant",
-            content: full.trim(),
-            mode,
-            committeeFramework: committee,
-            skillLevel: skill,
-          });
-        }
       } catch (error) {
-        if (!controller.signal.aborted) {
-          const message =
-            error instanceof Error ? error.message : "Generation failed.";
-          setStreamError(message);
-          toast.error(message);
-        }
+        const message =
+          error instanceof Error ? error.message : "Generation failed.";
+        setStreamError(message);
+        toast.error(message);
       } finally {
-        streamRef.current = null;
-        setLive(null);
         setIsStreaming(false);
       }
     },
-    [committee, skill, insertMessage, isStreaming],
+    [committee, skill, generateStrategicContent, isStreaming],
   );
 
-  const cancelStream = useCallback(() => {
-    streamRef.current?.abort();
-  }, []);
-
-  const isEmpty = (messages?.length ?? 0) === 0 && !live;
+  const isEmpty = (messages?.length ?? 0) === 0;
 
   return (
     <div className="flex h-full flex-col">
@@ -161,7 +117,7 @@ export function ChatView({
               <p className="mt-4 text-center text-sm leading-6 text-muted-foreground">
                 Tuned for {COMMITTEES[committee].label} ·{" "}
                 {SKILLS[skill].label} tier — speeches, trap POIs, and
-                resolution clauses, streamed as they are drafted.
+                resolution clauses, drafted live in the chamber.
               </p>
 
               <div className="mt-9 w-full">
@@ -199,38 +155,28 @@ export function ChatView({
           >
             <div className="flex-1 overflow-y-auto px-4 py-8 sm:px-8">
               <div className="mx-auto flex max-w-3xl flex-col gap-7">
-                {messages?.map((message) => (
-                  <ChatMessage
-                    key={message._id}
-                    role={message.role}
-                    content={message.content}
-                    mode={message.mode}
-                    committee={message.committeeFramework}
-                    skill={message.skillLevel}
-                  />
-                ))}
-
-                {live && (
-                  <div>
-                    <div className="mb-2 flex items-center gap-2 pr-1 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                      <span className="relative flex size-2">
-                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-60" />
-                        <span className="relative inline-flex size-2 rounded-full bg-accent" />
-                      </span>
-                      Apex is drafting · {MODE_LABELS[live.mode]}
-                    </div>
-                    <div className="rounded-2xl border border-white/8 bg-card/80 p-5 sm:p-6">
-                      <div className="md-body">
-                        <Markdown remarkPlugins={[remarkGfm]}>
-                          {live.text || "…"}
-                        </Markdown>
-                      </div>
-                      {isStreaming && (
-                        <span className="ml-0.5 inline-block h-4 w-2 animate-pulse bg-accent align-middle" />
+                {messages?.map((message, index) => (
+                  <div key={message._id}>
+                    {isStreaming &&
+                      index === messages.length - 1 &&
+                      message.role === "assistant" && (
+                        <div className="mb-2 flex items-center gap-2 pr-1 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                          <span className="relative flex size-2">
+                            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-60" />
+                            <span className="relative inline-flex size-2 rounded-full bg-accent" />
+                          </span>
+                          Apex is drafting · {MODE_LABELS[message.mode]}
+                        </div>
                       )}
-                    </div>
+                    <ChatMessage
+                      role={message.role}
+                      content={message.content}
+                      mode={message.mode}
+                      committee={message.committeeFramework}
+                      skill={message.skillLevel}
+                    />
                   </div>
-                )}
+                ))}
 
                 {/* Exact upstream error, printed straight onto the console */}
                 {streamError && (
@@ -268,13 +214,9 @@ export function ChatView({
                 />
                 <div className="mt-2.5 flex h-4 items-center justify-center">
                   {isStreaming ? (
-                    <button
-                      type="button"
-                      onClick={cancelStream}
-                      className="text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
-                    >
-                      Stop generating
-                    </button>
+                    <span className="text-[11px] font-medium text-muted-foreground">
+                      Apex is drafting…
+                    </span>
                   ) : (
                     <span className="text-[11px] text-muted-foreground/60">
                       Enter to send · Shift+Enter for a new line

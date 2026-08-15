@@ -22,6 +22,29 @@ export const list = query({
   },
 });
 
+/**
+ * Stream a partial assistant response into an existing message. Called by
+ * `api.debate.generateStrategicContent` once per token chunk; each call is a
+ * committed DB update, so the reactive `list` query re-renders the feed live.
+ */
+export const patchContent = mutation({
+  args: {
+    id: v.id("chatMessages"),
+    content: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) throw new Error("Not authenticated");
+
+    const message = await ctx.db.get(args.id);
+    if (!message || message.userId !== userId) {
+      throw new Error("Message not found");
+    }
+
+    await ctx.db.patch(args.id, { content: args.content });
+  },
+});
+
 /** Persist one chat message (user prompt or completed AI response). */
 export const insert = mutation({
   args: {

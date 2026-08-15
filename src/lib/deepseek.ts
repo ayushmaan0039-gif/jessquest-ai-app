@@ -1,8 +1,4 @@
-import type {
-  CommitteeFramework,
-  DebateMode,
-  SkillLevel,
-} from "@/convex/shared";
+import type { DebateMode } from "@/convex/shared";
 
 export type { DebateMode };
 
@@ -30,78 +26,7 @@ export function detectMode(prompt: string): DebateMode {
   return "interventions";
 }
 
-export type GenerateDebateArgs = {
-  mode: DebateMode;
-  committee: CommitteeFramework;
-  skill: SkillLevel;
-  prompt: string;
-};
 
-/** Stable production model, bound to the Experience Tier toggle. DeepSeek-V3
- *  (canonical ID `deepseek-chat`) is the engine behind every tier — the
- *  dropdown state tunes the persona server-side instead. Must stay
- *  synchronized with `CANONICAL_MODELS` in `src/convex/debate.ts`. */
-export const MODEL_BY_SKILL: Record<SkillLevel, string> = {
-  beginner: "deepseek-chat",
-  veteran: "deepseek-chat",
-};
-
-/**
- * Streams generated content from the Convex `/api/generate-debate` route.
- * Yields decoded text chunks as they arrive; throws on a non-2xx response
- * with the server's actual error detail (status + message).
- */
-export async function* streamGenerateDebate(
-  args: GenerateDebateArgs,
-  signal?: AbortSignal,
-): AsyncGenerator<string> {
-  const url = `${import.meta.env.VITE_CONVEX_URL}/api/generate-debate`;
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      mode: args.mode,
-      committee: args.committee,
-      skill: args.skill,
-      prompt: args.prompt,
-      model: MODEL_BY_SKILL[args.skill],
-    }),
-    signal,
-  });
-
-  if (!response.ok) {
-    // Read the raw body once, then try JSON detail, then plain text.
-    const raw = await response.text().catch(() => "");
-    let detail = "";
-    try {
-      const payload = JSON.parse(raw);
-      detail = typeof payload?.error === "string" ? payload.error : "";
-    } catch {
-      detail = raw.trim();
-    }
-    throw new Error(
-      detail || `Generation request failed with status ${response.status}.`,
-    );
-  }
-
-  if (!response.body) {
-    throw new Error("The server returned an empty stream.");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      if (chunk) yield chunk;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-}
 
 /** Parses the structured POI output: `QUESTION: …\nRESPONSE: …` */
 export function parsePoiOutput(

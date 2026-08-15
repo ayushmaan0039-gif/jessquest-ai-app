@@ -1,45 +1,49 @@
 /**
- * `/api/generate-debate` — server-side DeepSeek-V3 streaming endpoint.
+ * DeepSeek-V3 generation for MUN Apex AI.
  *
- * No external AI SDK, no external fetch route, and no external key of any
- * kind. Generation flows through Freebuff's native, built-in AI gateway — the
- * same endpoint the `@vly-ai/integrations` SDK targets — authenticated with
- * the deployment token that is injected automatically during project creation:
+ * Two entry points share ONE provider-call core (`generateText`):
  *
- *   process.env.VLY_INTEGRATION_KEY   (auto-set, format `sk_*`)
- *   process.env.VLY_INTEGRATION_BASE_URL (optional override; default is the
+ * 1. `generateStrategicContent` — a Convex ACTION called from the React
+ *    frontend via `useAction(api.debate.generateStrategicContent)` (no browser
+ *    fetch anywhere). It persists the user prompt, creates the assistant
+ *    message, and streams tokens into it by progressively patching the
+ *    message document, so the chat feed types out live via reactive queries.
+ *
+ * 2. `generateDebate` — the `/api/generate-debate` HTTP action, kept for
+ *    non-React clients and direct API access. Streams a text/plain body.
+ *
+ * No external AI SDK and no external API key of any kind. Generation flows
+ * through Freebuff's native, built-in AI gateway — the same endpoint the
+ * `@vly-ai/integrations` SDK targets — authenticated with the deployment
+ * token injected automatically during project creation:
+ *
+ *   process.env.VLY_INTEGRATION_KEY       (auto-set, format `sk_*`)
+ *   process.env.VLY_INTEGRATION_BASE_URL  (optional override; default is the
  *   gateway base the SDK ships with, https://integrations.vly.ai/v1/llm)
  *
  * If the gateway rejects the deployment token (platform provisioning issue),
- * the handler automatically falls back to DeepSeek's OFFICIAL API
+ * the core automatically falls back to DeepSeek's OFFICIAL API
  * (https://api.deepseek.com, model `deepseek-chat` = DeepSeek-V3) when
  * `DEEPSEEK_API_KEY` is configured in the project Keys/API keys tab.
+ * Neither path reads any external key-prefix environment variable.
  *
- * Request body (JSON):
- *   {
- *     mode: "interventions" | "poiVault" | "resolutions",
- *     committee: "un" | "loksabha" | "aippm",
- *     skill: "beginner" | "veteran",
- *     prompt: string,
- *     model?: string  // optional; canonical DeepSeek ID, defaults to
- *                     // "deepseek-chat" (DeepSeek-V3)
- *   }
- *
- * The raw prompt plus the active Committee Mode and Experience Tier
- * selections are piped straight to the model. A strict persona is injected
- * server-side per committee × skill combination (see PERSONAS below):
+ * Both paths inject the strict persona built from the active dropdown state
+ * (Committee Mode × Experience Tier):
  *   - UN + Beginner        → encouraging MUN coach, verbatim speech scripts
  *                            with phonetic pacing cues.
  *   - Lok Sabha/AIPPM + Veteran → elite parliamentary advisor, complex trap
  *                            cross-examinations, Rule 376/377 procedures,
  *                            intense debate rhetoric.
- *
- * Response: a text/plain streaming body (OpenAI-compatible SSE frames
- * decoded), with CORS headers so the dashboard can consume it from the
- * browser. Token chunks are forwarded as they arrive — the markdown bubble
- * types out live.
  */
-import { httpAction } from "./_generated/server";
+import { getAuthUserId } from "@convex-dev/auth/server";
+import { v } from "convex/values";
+import { action, httpAction } from "./_generated/server";
+import { api } from "./_generated/api";
+import {
+  chatModeValidator,
+  committeeFrameworkValidator,
+  skillLevelValidator,
+} from "./shared";
 
 /**
  * Canonical DeepSeek model identifiers. `deepseek-chat` is DeepSeek's
@@ -54,8 +58,7 @@ const COMMITTEES = ["un", "loksabha", "aippm"] as const;
 const SKILLS = ["beginner", "veteran"] as const;
 
 /** Model chosen per Experience Tier (both resolve to DeepSeek-V3 — one
- *  engine, tuned by the persona matrix instead). Synchronized with the
- *  frontend bindings in `src/lib/deepseek.ts`. */
+ *  engine, tuned by the persona matrix instead). */
 const MODEL_BY_SKILL: Record<string, string> = {
   beginner: "deepseek-chat",
   veteran: "deepseek-chat",
@@ -121,23 +124,28 @@ const OUTPUT_FORMATS: Record<string, string> = {
     "Output format (exactly this shape):\nPREAMBULATORY:\n- <clause>\n- <clause>\nOPERATIVE:\n- <clause>\n- <clause>",
 };
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
+/** Resolves the canonical model, falling back to the Experience Tier map. */
+function resolveModel(skill: string, requested?: string): string {
+  if (requested && CANONICAL_MODELS.includes(requested as never)) {
+    return requested;
+  }
+  return MODEL_BY_SKILL[skill] ?? "deepseek-chat";
+}
 
-function jsonResponse(
-  status: number,
-  payload: Record<string, unknown>,
-): Response {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      ...CORS_HEADERS,
-    },
-  });
+/** Builds the strict system instruction for the selected chamber × tier. */
+function buildSystemInstruction(
+  mode: string,
+  committee: string,
+  skill: string,
+): string {
+  const persona = PERSONAS[`${committee}:${skill}`] ?? PERSONAS["un:beginner"];
+  return [
+    "You are MUN Apex AI, the in-chamber drafting assistant inside a premium debate dashboard. You are running a live conversational loop for one delegate.",
+    persona,
+    MODE_INSTRUCTIONS[mode],
+    OUTPUT_FORMATS[mode],
+    "Respond with only the requested content — no preamble, no commentary, no markdown headers.",
+  ].join("\n\n");
 }
 
 /**
@@ -159,59 +167,6 @@ function extractStreamText(payload: unknown): string {
   return choice?.delta?.content ?? choice?.message?.content ?? "";
 }
 
-/**
- * Converts the upstream SSE stream into a plain text stream. Each `data:`
- * frame is parsed and its incremental text is forwarded downstream.
- */
-function sseToTextStream(upstream: ReadableStream<Uint8Array>) {
-  const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        const reader = upstream.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          let newlineIndex: number;
-          while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
-            const line = buffer.slice(0, newlineIndex).trim();
-            buffer = buffer.slice(newlineIndex + 1);
-            if (!line.startsWith("data:")) continue;
-
-            const frame = line.slice(5).trim();
-            if (!frame || frame === "[DONE]") continue;
-
-            try {
-              const text = extractStreamText(JSON.parse(frame));
-              if (text) {
-                controller.enqueue(encoder.encode(text));
-              }
-            } catch {
-              // Malformed frame — skip it, keep streaming.
-            }
-          }
-        }
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Unknown stream error";
-        controller.enqueue(
-          encoder.encode(`\n[Generation interrupted: ${message}]`),
-        );
-      } finally {
-        controller.close();
-      }
-    },
-    cancel() {
-      // Client disconnected — stop consuming the upstream stream.
-    },
-  });
-}
-
 /** Parses the exact error body an OpenAI-compatible provider returns. */
 async function extractUpstreamError(upstream: Response): Promise<string> {
   try {
@@ -226,6 +181,259 @@ async function extractUpstreamError(upstream: Response): Promise<string> {
   } catch {
     return (await upstream.text().catch(() => "")).trim();
   }
+}
+
+/** Consumes an OpenAI-compatible SSE stream, yielding incremental text. */
+async function consumeSse(
+  upstream: ReadableStream<Uint8Array>,
+  onChunk?: (chunk: string) => void | Promise<unknown>,
+): Promise<string> {
+  const reader = upstream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let full = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let newlineIndex: number;
+    while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+      if (!line.startsWith("data:")) continue;
+
+      const frame = line.slice(5).trim();
+      if (!frame || frame === "[DONE]") continue;
+
+      try {
+        const text = extractStreamText(JSON.parse(frame));
+        if (text) {
+          full += text;
+          await onChunk?.(text);
+        }
+      } catch {
+        // Malformed frame — skip it, keep streaming.
+      }
+    }
+  }
+  return full;
+}
+
+/** Executes one streaming chat-completions request against an endpoint. */
+async function streamFromEndpoint(
+  endpoint: string,
+  authToken: string,
+  payload: Record<string, unknown>,
+  provider: "gateway" | "deepseek-api",
+  onChunk?: (chunk: string) => void | Promise<unknown>,
+): Promise<string> {
+  let upstream: Response;
+  try {
+    upstream = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${authToken}`,
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(25000),
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown network error";
+    throw new Error(`[${provider}] network request failed: ${message}`);
+  }
+
+  if (!upstream.ok) {
+    const detail = await extractUpstreamError(upstream);
+    throw new Error(`DeepSeek request failed (${upstream.status}): ${detail}`);
+  }
+
+  if (!upstream.body) {
+    throw new Error(`The provider (${provider}) returned an empty stream.`);
+  }
+
+  return consumeSse(upstream.body, onChunk);
+}
+
+// ---------------------------------------------------------------------------
+// THE SHARED CORE — provider selection + gateway → official API fallback
+// ---------------------------------------------------------------------------
+
+async function generateText(
+  args: {
+    model: string;
+    systemInstruction: string;
+    prompt: string;
+  },
+  onChunk?: (chunk: string) => void | Promise<unknown>,
+): Promise<{ text: string; provider: "gateway" | "deepseek-api" }> {
+  const gatewayKey = process.env.VLY_INTEGRATION_KEY;
+  const deepseekKey = process.env.DEEPSEEK_API_KEY;
+
+  const payload = {
+    model: args.model,
+    messages: [
+      { role: "system", content: args.systemInstruction },
+      { role: "user", content: args.prompt },
+    ],
+    stream: true,
+    temperature: 0.7,
+  };
+
+  let provider: "gateway" | "deepseek-api";
+  let endpoint: string;
+  let authToken: string;
+  if (gatewayKey) {
+    provider = "gateway";
+    endpoint = `${gatewayBase()}/chat/completions`;
+    authToken = gatewayKey;
+  } else if (deepseekKey) {
+    provider = "deepseek-api";
+    endpoint = `${DEEPSEEK_API_BASE}/chat/completions`;
+    authToken = deepseekKey;
+  } else {
+    throw new Error(
+      "No AI provider is configured. The Freebuff gateway token (VLY_INTEGRATION_KEY) is missing — add a DEEPSEEK_API_KEY in the project Keys/API keys tab as an alternative.",
+    );
+  }
+
+  try {
+    const text = await streamFromEndpoint(
+      endpoint,
+      authToken,
+      payload,
+      provider,
+      onChunk,
+    );
+    return { text, provider };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : String(error);
+
+    // Automatic fallback: the gateway rejected the deployment token (a
+    // platform provisioning issue), but an official DeepSeek API key is
+    // available — retry against DeepSeek's API with the same payload.
+    if (
+      provider === "gateway" &&
+      deepseekKey &&
+      /request failed \((401|403)\)/.test(message)
+    ) {
+      const text = await streamFromEndpoint(
+        `${DEEPSEEK_API_BASE}/chat/completions`,
+        deepseekKey,
+        payload,
+        "deepseek-api",
+        onChunk,
+      );
+      return { text, provider: "deepseek-api" };
+    }
+
+    const hint =
+      provider === "gateway"
+        ? " The Freebuff gateway rejected the deployment token (platform provisioning issue). Add a DEEPSEEK_API_KEY in the project Keys/API keys tab to use the official DeepSeek-V3 API instead."
+        : "";
+    throw new Error(`${message}${hint}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ENTRY POINT 1 — Convex action used by the React frontend (useAction).
+// ---------------------------------------------------------------------------
+
+export const generateStrategicContent = action({
+  args: {
+    mode: chatModeValidator,
+    committee: committeeFrameworkValidator,
+    skill: skillLevelValidator,
+    prompt: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (userId === null) throw new Error("Not authenticated");
+
+    const prompt = args.prompt.trim();
+    if (!prompt) throw new Error("Prompt cannot be empty.");
+
+    const model = resolveModel(args.skill);
+    const systemInstruction = buildSystemInstruction(
+      args.mode,
+      args.committee,
+      args.skill,
+    );
+
+    // 1. Persist the user prompt so it appears instantly in the feed.
+    await ctx.runMutation(api.chat.insert, {
+      role: "user",
+      content: prompt,
+      mode: args.mode,
+      committeeFramework: args.committee,
+      skillLevel: args.skill,
+    });
+
+    // 2. Create the assistant message, then patch its content as tokens
+    //    stream in — each patch is a committed DB update, so the reactive
+    //    `api.chat.list` query makes the markdown bubble type out live.
+    const assistantId = await ctx.runMutation(api.chat.insert, {
+      role: "assistant",
+      content: "",
+      mode: args.mode,
+      committeeFramework: args.committee,
+      skillLevel: args.skill,
+    });
+
+    let full = "";
+    try {
+      const result = await generateText(
+        { model, systemInstruction, prompt },
+        (chunk) => {
+          full += chunk;
+          return ctx.runMutation(api.chat.patchContent, {
+            id: assistantId,
+            content: full,
+          });
+        },
+      );
+      return { text: result.text, model, provider: result.provider };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Generation failed.";
+      // Persist the exact failure onto the message so it survives reloads,
+      // then rethrow so the client can surface the red console banner too.
+      await ctx
+        .runMutation(api.chat.patchContent, {
+          id: assistantId,
+          content: `⚠️ Generation failed: ${message}`,
+        })
+        .catch(() => undefined);
+      throw error;
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// ENTRY POINT 2 — HTTP action `/api/generate-debate` (non-React clients).
+// ---------------------------------------------------------------------------
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
+function jsonResponse(
+  status: number,
+  payload: Record<string, unknown>,
+): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      ...CORS_HEADERS,
+    },
+  });
 }
 
 export const generateDebate = httpAction(async (_ctx, request) => {
@@ -254,15 +462,7 @@ export const generateDebate = httpAction(async (_ctx, request) => {
   const committee = typeof body.committee === "string" ? body.committee : "";
   const skill = typeof body.skill === "string" ? body.skill : "";
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
-
-  // Resolve the model from the request if it is a canonical DeepSeek ID,
-  // otherwise fall back to the Experience Tier mapping (always DeepSeek-V3).
   const requestedModel = typeof body.model === "string" ? body.model : "";
-  const model = CANONICAL_MODELS.includes(
-    requestedModel as (typeof CANONICAL_MODELS)[number],
-  )
-    ? requestedModel
-    : (MODEL_BY_SKILL[skill] ?? "deepseek-chat");
 
   if (!mode || !committee || !skill || !prompt) {
     return jsonResponse(400, {
@@ -279,149 +479,32 @@ export const generateDebate = httpAction(async (_ctx, request) => {
     return jsonResponse(400, { error: `Unknown skill: ${skill}` });
   }
 
-  const persona = PERSONAS[`${committee}:${skill}`] ?? PERSONAS["un:beginner"];
+  const model = resolveModel(skill, requestedModel);
+  const systemInstruction = buildSystemInstruction(mode, committee, skill);
 
-  const systemInstruction = [
-    "You are MUN Apex AI, the in-chamber drafting assistant inside a premium debate dashboard. You are running a live conversational loop for one delegate.",
-    persona,
-    MODE_INSTRUCTIONS[mode],
-    OUTPUT_FORMATS[mode],
-    "Respond with only the requested content — no preamble, no commentary, no markdown headers.",
-  ].join("\n\n");
-
-  const payload = {
-    model,
-    messages: [
-      { role: "system", content: systemInstruction },
-      { role: "user", content: prompt },
-    ],
-    stream: true,
-    temperature: 0.7,
-  };
-
-  // -------------------------------------------------------------------------
-  // Provider selection.
-  //   1. Freebuff's native built-in gateway (no key needed — deployment token
-  //      injected automatically). This is the requested route.
-  //   2. If the gateway rejects the deployment token (platform provisioning
-  //      issue) and a DEEPSEEK_API_KEY is configured, fall back to DeepSeek's
-  //      OFFICIAL API — same model, same payload, same streaming.
-  // -------------------------------------------------------------------------
-  const gatewayKey = process.env.VLY_INTEGRATION_KEY;
-  const deepseekKey = process.env.DEEPSEEK_API_KEY;
-
-  let provider: "gateway" | "deepseek-api";
-  let endpoint: string;
-  let authToken: string;
-  if (gatewayKey) {
-    provider = "gateway";
-    endpoint = `${gatewayBase()}/chat/completions`;
-    authToken = gatewayKey;
-  } else if (deepseekKey) {
-    provider = "deepseek-api";
-    endpoint = `${DEEPSEEK_API_BASE}/chat/completions`;
-    authToken = deepseekKey;
-  } else {
-    // NOTE: errors are returned with a 4xx status on purpose — the hosting
-    // edge masks 5xx response bodies, so a 5xx would swallow this message.
-    return jsonResponse(400, {
-      error:
-        "No AI provider is configured. The Freebuff gateway token (VLY_INTEGRATION_KEY) is missing — add a DEEPSEEK_API_KEY in the project Keys/API keys tab as an alternative.",
-    });
-  }
-
-  let upstream: Response;
-  try {
-    upstream = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${authToken}`,
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(25000),
-    });
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Unknown network error";
-    return jsonResponse(400, {
-      error: `[${provider}] network request failed: ${message}`,
-      model,
-    });
-  }
-
-  // Error safety net: surface the provider's exact error message verbatim on
-  // the dashboard console — never a generic 404 block.
-  if (!upstream.ok) {
-    const detail = await extractUpstreamError(upstream);
-
-    // Automatic fallback: gateway rejected the deployment token, but an
-    // official DeepSeek API key is available — retry against DeepSeek.
-    if (
-      provider === "gateway" &&
-      deepseekKey &&
-      (upstream.status === 401 || upstream.status === 403)
-    ) {
-      const fallbackEndpoint = `${DEEPSEEK_API_BASE}/chat/completions`;
-      let fallback: Response;
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
       try {
-        fallback = await fetch(fallbackEndpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${deepseekKey}`,
-          },
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(25000),
+        await generateText({ model, systemInstruction, prompt }, (chunk) => {
+          controller.enqueue(encoder.encode(chunk));
         });
       } catch (error) {
         const message =
-          error instanceof Error ? error.message : "Unknown network error";
-        return jsonResponse(400, {
-          error: `[deepseek-api] network request failed: ${message}`,
-          model,
-        });
+          error instanceof Error ? error.message : "Unknown error";
+        controller.enqueue(
+          encoder.encode(`\n[Generation failed: ${message}]`),
+        );
+      } finally {
+        controller.close();
       }
-      if (!fallback.ok) {
-        const fallbackDetail = await extractUpstreamError(fallback);
-        return jsonResponse(400, {
-          error: `DeepSeek request failed (${fallback.status}): ${fallbackDetail}`,
-          model,
-        });
-      }
-      if (!fallback.body) {
-        return jsonResponse(400, {
-          error: "The DeepSeek API returned an empty stream.",
-          model,
-        });
-      }
-      return new Response(sseToTextStream(fallback.body), {
-        headers: {
-          ...CORS_HEADERS,
-          "Content-Type": "text/plain; charset=utf-8",
-          "Cache-Control": "no-cache",
-        },
-      });
-    }
+    },
+    cancel() {
+      // Client disconnected — stop consuming the upstream stream.
+    },
+  });
 
-    const hint =
-      provider === "gateway"
-        ? " The Freebuff gateway rejected the deployment token (platform provisioning issue). Add a DEEPSEEK_API_KEY in the project Keys/API keys tab to use the official DeepSeek-V3 API instead."
-        : "";
-    return jsonResponse(400, {
-      error: `DeepSeek request failed (${upstream.status}): ${detail}${hint}`,
-      model,
-    });
-  }
-
-  if (!upstream.body) {
-    return jsonResponse(400, {
-      error: `The provider (${provider}) returned an empty stream.`,
-      model,
-    });
-  }
-
-  return new Response(sseToTextStream(upstream.body), {
+  return new Response(stream, {
     headers: {
       ...CORS_HEADERS,
       "Content-Type": "text/plain; charset=utf-8",

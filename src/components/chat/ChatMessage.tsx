@@ -105,7 +105,11 @@ export function ChatMessage({
 
       <div className="rounded-2xl border border-white/8 bg-card/80 p-5 sm:p-6">
         <div className="md-body">
-          <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+          {content ? (
+            <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+          ) : (
+            <span className="text-muted-foreground">…</span>
+          )}
         </div>
       </div>
 
