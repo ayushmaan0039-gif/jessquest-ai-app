@@ -6,7 +6,8 @@ const http = httpRouter();
 
 auth.addHttpRoutes(http);
 
-// Gemini-powered debate generation — streams text back to the dashboard.
+// DeepSeek-V3 debate generation via the Freebuff gateway — streams text back
+// to the dashboard.
 http.route({
   path: "/api/generate-debate",
   method: "POST",

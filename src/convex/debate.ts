@@ -1,12 +1,14 @@
 /**
- * `/api/generate-debate` — server-side Gemini streaming endpoint.
+ * `/api/generate-debate` — server-side DeepSeek-V3 streaming endpoint.
  *
- * Implements the call to Google with a RAW HTTP fetch() — no SDK, no client
- * libraries. The key is read from the environment (in order of preference):
- *   process.env.VITE_GEMINI_API_KEY
- *   process.env.GEMINI_API_KEY          (fallback)
+ * No external AI SDK, no external fetch route, and no external key of any
+ * kind. Generation flows through Freebuff's native, built-in AI gateway — the same
+ * endpoint the `@vly-ai/integrations` SDK targets — authenticated with the
+ * deployment token that is injected automatically during project creation:
  *
- * Set `VITE_GEMINI_API_KEY` in Freebuff → project Keys/API keys tab.
+ *   process.env.VLY_INTEGRATION_KEY   (auto-set, format `sk_*`)
+ *   process.env.VLY_INTEGRATION_BASE_URL (optional override; default is the
+ *   gateway base the SDK ships with, https://integrations.vly.ai/v1/llm)
  *
  * Request body (JSON):
  *   {
@@ -14,34 +16,57 @@
  *     committee: "un" | "loksabha" | "aippm",
  *     skill: "beginner" | "veteran",
  *     prompt: string,
- *     model?: "gemini-2.0-flash" | "gemini-2.0-pro"  // optional, defaults by skill
+ *     model?: string  // optional; canonical DeepSeek ID, defaults to
+ *                     // "deepseek-chat" (DeepSeek-V3)
  *   }
  *
  * The raw prompt plus the active Committee Mode and Experience Tier
- * selections are piped straight to Google. A strict persona is injected per
- * committee × skill combination (see PERSONAS below). Only the canonical
- * production model strings are accepted; the model is resolved from the
- * Experience Tier toggle (Beginner → gemini-2.0-flash, Veteran →
- * gemini-2.0-pro).
+ * selections are piped straight to the model. A strict persona is injected
+ * server-side per committee × skill combination (see PERSONAS below):
+ *   - UN + Beginner        → encouraging MUN coach, verbatim speech scripts
+ *                            with phonetic pacing cues.
+ *   - Lok Sabha/AIPPM + Veteran → elite parliamentary advisor, complex trap
+ *                            cross-examinations, Rule 376/377 procedures,
+ *                            intense debate rhetoric.
  *
- * Response: a text/plain streaming body (SSE frames decoded), with CORS
- * headers so the dashboard can consume it from the browser.
+ * Response: a text/plain streaming body (OpenAI-compatible SSE frames
+ * decoded), with CORS headers so the dashboard can consume it from the
+ * browser. Token chunks are forwarded as they arrive — the markdown bubble
+ * types out live.
  */
 import { httpAction } from "./_generated/server";
 
-/** Stable production models — synchronized with the frontend toggle bindings
- *  in `src/lib/gemini.ts`. Gemini 2.0 family: no retired 1.5 references. */
-const CANONICAL_MODELS = ["gemini-2.0-flash", "gemini-2.0-pro"] as const;
+/**
+ * Canonical DeepSeek model identifiers. `deepseek-chat` is DeepSeek's
+ * production alias for DeepSeek-V3 (the identifier their API and the AI SDK
+ * gateway expect). No Google model strings exist anywhere in this file.
+ */
+const CANONICAL_MODELS = ["deepseek-chat"] as const;
 
-/** Model chosen by the Experience Tier toggle when the client does not
- *  explicitly pass one: Beginner → flash (fast coaching), Veteran → pro. */
+/** Model chosen per Experience Tier (both resolve to DeepSeek-V3 — one
+ *  engine, tuned by the persona matrix instead). Synchronized with the
+ *  frontend bindings in `src/lib/deepseek.ts`. */
 const MODEL_BY_SKILL: Record<string, string> = {
-  beginner: "gemini-2.0-flash",
-  veteran: "gemini-2.0-pro",
+  beginner: "deepseek-chat",
+  veteran: "deepseek-chat",
 };
 
-/** Global generative language endpoint — the canonical Google AI path. */
-const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+/**
+ * Resolves the gateway base for chat completions. Honors
+ * `VLY_INTEGRATION_BASE_URL` if the platform set it (per integrations.md the
+ * default is https://integrations.freebuff.com/), otherwise falls back to the
+ * exact base URL the `@vly-ai/integrations` SDK ships with
+ * (https://integrations.vly.ai/v1/llm). `/v1/llm` is appended if missing so
+ * both forms work.
+ */
+function gatewayBase(): string {
+  const configured = process.env.VLY_INTEGRATION_BASE_URL?.trim();
+  if (configured) {
+    const base = configured.replace(/\/+$/, "");
+    return base.endsWith("/v1/llm") ? base : `${base}/v1/llm`;
+  }
+  return "https://integrations.vly.ai/v1/llm";
+}
 
 // ---------------------------------------------------------------------------
 // Strict personas per dropdown combination (Committee Mode × Experience Tier)
@@ -103,27 +128,27 @@ function jsonResponse(
   });
 }
 
-/** Pulls the incremental text out of a Gemini streaming frame. */
+/**
+ * Pulls the incremental text out of an OpenAI-compatible streaming frame:
+ * `choices[0].delta.content` for stream chunks, `choices[0].message.content`
+ * for non-streamed fallbacks.
+ */
 function extractStreamText(payload: unknown): string {
   if (typeof payload !== "object" || payload === null) return "";
   const data = payload as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-    text?: string;
+    choices?: Array<{
+      delta?: { content?: string };
+      message?: { content?: string };
+    }>;
+    error?: { message?: string };
   };
-  const candidates = data.candidates;
-  if (Array.isArray(candidates)) {
-    const parts = candidates[0]?.content?.parts;
-    if (Array.isArray(parts)) {
-      return parts
-        .map((part) => (typeof part?.text === "string" ? part.text : ""))
-        .join("");
-    }
-  }
-  return typeof data.text === "string" ? data.text : "";
+  if (data.error) return "";
+  const choice = data.choices?.[0];
+  return choice?.delta?.content ?? choice?.message?.content ?? "";
 }
 
 /**
- * Converts Google's SSE stream into a plain text stream. Each `data:`
+ * Converts the gateway's SSE stream into a plain text stream. Each `data:`
  * frame is parsed and its incremental text is forwarded downstream.
  */
 function sseToTextStream(upstream: ReadableStream<Uint8Array>) {
@@ -184,12 +209,11 @@ export const generateDebate = httpAction(async (_ctx, request) => {
     return jsonResponse(405, { error: "Method not allowed. Use POST." });
   }
 
-  const apiKey =
-    process.env.VITE_GEMINI_API_KEY ?? process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  const gatewayKey = process.env.VLY_INTEGRATION_KEY;
+  if (!gatewayKey) {
     return jsonResponse(500, {
       error:
-        "VITE_GEMINI_API_KEY is not configured. Add it in the project Keys/API keys tab.",
+        "VLY_INTEGRATION_KEY is not configured. It is injected automatically on project creation — check the project Keys/API keys tab.",
     });
   }
 
@@ -211,14 +235,14 @@ export const generateDebate = httpAction(async (_ctx, request) => {
   const skill = typeof body.skill === "string" ? body.skill : "";
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
 
-  // Resolve the model from the request if it is a canonical string, otherwise
-  // fall back to the Experience Tier mapping.
+  // Resolve the model from the request if it is a canonical DeepSeek ID,
+  // otherwise fall back to the Experience Tier mapping (always DeepSeek-V3).
   const requestedModel = typeof body.model === "string" ? body.model : "";
   const model = CANONICAL_MODELS.includes(
     requestedModel as (typeof CANONICAL_MODELS)[number],
   )
     ? requestedModel
-    : (MODEL_BY_SKILL[skill] ?? "gemini-2.0-pro");
+    : (MODEL_BY_SKILL[skill] ?? "deepseek-chat");
 
   if (!mode || !committee || !skill || !prompt) {
     return jsonResponse(400, {
@@ -246,35 +270,43 @@ export const generateDebate = httpAction(async (_ctx, request) => {
   ].join("\n\n");
 
   // -------------------------------------------------------------------------
-  // RAW fetch() to Google's official streaming endpoint — no SDK involved.
+  // RAW fetch() to Freebuff's native built-in gateway — the same endpoint the
+  // `@vly-ai/integrations` SDK hits under the hood. OpenAI-compatible chat
+  // completions payload, streamed.
   // -------------------------------------------------------------------------
-  const endpoint =
-    `${GEMINI_BASE_URL}/v1beta/models/${model}:streamGenerateContent` +
-    `?alt=sse&key=${encodeURIComponent(apiKey)}`;
+  const endpoint = `${gatewayBase()}/chat/completions`;
 
   const payload = {
-    contents: [{ parts: [{ text: prompt }] }],
-    systemInstruction: { parts: [{ text: systemInstruction }] },
+    model,
+    messages: [
+      { role: "system", content: systemInstruction },
+      { role: "user", content: prompt },
+    ],
+    stream: true,
+    temperature: 0.7,
   };
 
   let upstream: Response;
   try {
     upstream = await fetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${gatewayKey}`,
+      },
       body: JSON.stringify(payload),
     });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unknown network error";
     return jsonResponse(502, {
-      error: `Gemini network request failed: ${message}`,
+      error: `Gateway network request failed: ${message}`,
       model,
     });
   }
 
-  // Error safety net: surface Google's exact error message, never a generic
-  // 404 block.
+  // Error safety net: surface the gateway's exact error message verbatim on
+  // the dashboard console — never a generic 404 block.
   if (!upstream.ok) {
     let detail = "";
     try {
@@ -290,14 +322,14 @@ export const generateDebate = httpAction(async (_ctx, request) => {
       detail = (await upstream.text().catch(() => "")).trim();
     }
     return jsonResponse(502, {
-      error: `Gemini request failed (${upstream.status}): ${detail}`,
+      error: `DeepSeek request failed (${upstream.status}): ${detail}`,
       model,
     });
   }
 
   if (!upstream.body) {
     return jsonResponse(502, {
-      error: "Gemini returned an empty stream.",
+      error: "The gateway returned an empty stream.",
       model,
     });
   }

@@ -13,7 +13,7 @@ import type {
 } from "@/convex/shared";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatMessage } from "@/components/chat/ChatMessage";
-import { detectMode, streamGenerateDebate } from "@/lib/gemini";
+import { detectMode, streamGenerateDebate } from "@/lib/deepseek";
 import { COMMITTEES, SKILLS } from "@/components/dashboard/data";
 
 const SUGGESTIONS = [
