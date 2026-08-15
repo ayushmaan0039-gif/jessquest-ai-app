@@ -11,7 +11,7 @@ import type {
 } from "@/convex/shared";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatMessage } from "@/components/chat/ChatMessage";
-import { detectMode } from "@/lib/deepseek";
+import { detectMode } from "@/lib/ai";
 import { COMMITTEES, SKILLS } from "@/components/dashboard/data";
 
 const SUGGESTIONS = [

@@ -1,5 +1,5 @@
 /**
- * AI generation for MUN Apex AI — DeepSeek-V3, direct and permanent.
+ * AI generation for MUN Apex AI — routed through OpenRouter's public network.
  *
  * Two entry points share ONE provider-call core (`generateText`):
  *
@@ -12,17 +12,21 @@
  * 2. `generateDebate` — the `/api/generate-debate` HTTP action, kept for
  *    non-React clients and direct API access. Streams a text/plain body.
  *
- * THE ONLY PROVIDER — DeepSeek-V3, direct:
+ * THE ROUTE — OpenRouter (https://openrouter.ai/api/v1/chat/completions):
  *
- *   Endpoint : https://api.deepseek.com/chat/completions
- *              (DeepSeek's official, permanent production endpoint — the
- *              bare `deepseek.com` host serves the marketing site.)
- *   Model    : `deepseek-chat` (DeepSeek's production alias for DeepSeek-V3)
- *   Auth     : Bearer ${process.env.DEEPSEEK_API_KEY}
- *
- * No SDK, no wrapper functions, no intermediate proxy — one standard fetch()
- * with raw SSE streaming. Set `DEEPSEEK_API_KEY` in the project Keys/API
- * keys tab.
+ *   Endpoint : https://openrouter.ai/api/v1/chat/completions
+ *              (OpenRouter's official API path — the bare openrouter.ai host
+ *              serves their website, not the API.)
+ *   Model    : google/gemma-4-31b-it:free — a live, $0 free model from
+ *              OpenRouter's catalog. NOTE: the previously requested
+ *              `meta-llama/llama-3-8b-instruct:free` has been retired from
+ *              OpenRouter (no :free llama models remain); gemma-4-31b-it:free
+ *              is the live free equivalent for long-form drafting.
+ *   Headers  : Content-Type, HTTP-Referer, X-Title (public identity headers).
+ *   Auth     : OpenRouter requires a free account API key (sk-or-v1-…) even
+ *              for :free models — the model itself costs $0. When
+ *              `OPENROUTER_API_KEY` is set it is sent as a Bearer token;
+ *              otherwise the request is rejected with a clear message.
  *
  * The raw prompt plus the active Committee Mode and Experience Tier
  * selections are piped straight to the model. A strict persona is injected
@@ -44,25 +48,29 @@ import {
 } from "./shared";
 
 /**
- * Canonical model identifiers. `deepseek-chat` is DeepSeek's production
- * alias for DeepSeek-V3 — what the official DeepSeek API expects.
+ * Canonical model identifiers. `google/gemma-4-31b-it:free` is a live,
+ * $0 free model on OpenRouter's public catalog.
  */
-const CANONICAL_MODELS = ["deepseek-chat"] as const;
+const CANONICAL_MODELS = ["google/gemma-4-31b-it:free"] as const;
 
 /** Valid dropdown values, used for strict request validation (must match
  *  `CommitteeFramework` / `SkillLevel` in `src/convex/shared.ts`). */
 const COMMITTEES = ["un", "loksabha", "aippm"] as const;
 const SKILLS = ["beginner", "veteran"] as const;
 
-/** Model chosen per Experience Tier — one engine (DeepSeek-V3), tuned by the
- *  persona matrix instead. */
+/** Model chosen per Experience Tier — one free engine, tuned by the persona
+ *  matrix instead. */
 const MODEL_BY_SKILL: Record<string, string> = {
-  beginner: "deepseek-chat",
-  veteran: "deepseek-chat",
+  beginner: "google/gemma-4-31b-it:free",
+  veteran: "google/gemma-4-31b-it:free",
 };
 
-/** DeepSeek's official, permanent production endpoint (OpenAI-compatible). */
-const DEEPSEEK_API_BASE = "https://api.deepseek.com";
+/** OpenRouter's official API base (chat completions live under /api/v1). */
+const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1";
+
+/** Public client identity headers (no secrets). */
+const OPENROUTER_REFERER = "https://localhost:3000";
+const OPENROUTER_TITLE = "MUN AI Diplomat Client";
 
 // ---------------------------------------------------------------------------
 // Strict personas per dropdown combination (Committee Mode × Experience Tier)
@@ -110,7 +118,7 @@ function resolveModel(skill: string, requested?: string): string {
   if (requested && CANONICAL_MODELS.includes(requested as never)) {
     return requested;
   }
-  return MODEL_BY_SKILL[skill] ?? "deepseek-chat";
+  return MODEL_BY_SKILL[skill] ?? "google/gemma-4-31b-it:free";
 }
 
 /** Builds the strict system instruction for the selected chamber × tier. */
@@ -130,7 +138,7 @@ function buildSystemInstruction(
 }
 
 // ---------------------------------------------------------------------------
-// Streaming helpers (DeepSeek uses OpenAI-compatible SSE)
+// Streaming helpers (OpenRouter uses OpenAI-compatible SSE)
 // ---------------------------------------------------------------------------
 
 /**
@@ -152,7 +160,7 @@ function extractStreamText(payload: unknown): string {
   return choice?.delta?.content ?? choice?.message?.content ?? "";
 }
 
-/** Parses the exact error body DeepSeek returns. */
+/** Parses the exact error body OpenRouter returns. */
 async function extractUpstreamError(upstream: Response): Promise<string> {
   try {
     const errorJson = (await upstream.json()) as {
@@ -207,7 +215,7 @@ async function consumeSse(
 }
 
 // ---------------------------------------------------------------------------
-// THE CORE — one standard, direct fetch() to the DeepSeek production API
+// THE CORE — one direct fetch() to OpenRouter's public network
 // ---------------------------------------------------------------------------
 
 async function generateText(
@@ -218,10 +226,14 @@ async function generateText(
   },
   onChunk?: (chunk: string) => void | Promise<unknown>,
 ): Promise<string> {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
+  const apiKey = process.env.OPENROUTER_API_KEY;
+
+  // OpenRouter requires a free account API key even for :free models — the
+  // model itself costs $0, but there is no anonymous endpoint. Surface this
+  // clearly instead of letting OpenRouter reply with a bare 401.
   if (!apiKey) {
     throw new Error(
-      "DEEPSEEK_API_KEY is not configured. Add it in the project Keys/API keys tab to arm the DeepSeek-V3 engine.",
+      "OPENROUTER_API_KEY is not configured. OpenRouter requires a free account API key (sk-or-v1-…) even for $0 :free models — add it in the project Keys/API keys tab.",
     );
   }
 
@@ -237,11 +249,13 @@ async function generateText(
 
   let upstream: Response;
   try {
-    upstream = await fetch(`${DEEPSEEK_API_BASE}/chat/completions`, {
+    upstream = await fetch(`${OPENROUTER_API_BASE}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
+        "HTTP-Referer": OPENROUTER_REFERER,
+        "X-Title": OPENROUTER_TITLE,
       },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(25000),
@@ -249,18 +263,20 @@ async function generateText(
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unknown network error";
-    throw new Error(`[DeepSeek] network request failed: ${message}`);
+    throw new Error(`[OpenRouter] network request failed: ${message}`);
   }
 
-  // Error safety net: surface DeepSeek's exact error message verbatim on the
-  // dashboard console — never a generic 401/404 block.
+  // Error safety net: surface OpenRouter's exact error message verbatim on
+  // the dashboard console — never a generic 401/404 block.
   if (!upstream.ok) {
     const detail = await extractUpstreamError(upstream);
-    throw new Error(`DeepSeek request failed (${upstream.status}): ${detail}`);
+    throw new Error(
+      `OpenRouter request failed (${upstream.status}): ${detail}`,
+    );
   }
 
   if (!upstream.body) {
-    throw new Error("The DeepSeek API returned an empty stream.");
+    throw new Error("OpenRouter returned an empty stream.");
   }
 
   return consumeSse(upstream.body, onChunk);
@@ -323,7 +339,7 @@ export const generateStrategicContent = action({
           });
         },
       );
-      return { text, model, provider: "deepseek" };
+      return { text, model, provider: "openrouter" };
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Generation failed.";
