@@ -37,11 +37,12 @@ export type GenerateDebateArgs = {
   prompt: string;
 };
 
-/** Stable production model aliases, bound to the Experience Tier toggle.
- *  Must stay synchronized with `CANONICAL_MODELS` in `src/convex/debate.ts`. */
+/** Stable production models, bound to the Experience Tier toggle. Gemini 2.0
+ *  family. Must stay synchronized with `CANONICAL_MODELS` in
+ *  `src/convex/debate.ts`. */
 export const MODEL_BY_SKILL: Record<SkillLevel, string> = {
-  beginner: "gemini-1.5-flash",
-  veteran: "gemini-1.5-pro-latest",
+  beginner: "gemini-2.0-flash",
+  veteran: "gemini-2.0-pro",
 };
 
 /**
