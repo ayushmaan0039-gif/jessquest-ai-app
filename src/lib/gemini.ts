@@ -37,9 +37,16 @@ export type GenerateDebateArgs = {
   prompt: string;
 };
 
+/** Canonical production model strings, chosen by the Experience Tier toggle. */
+export const MODEL_BY_SKILL: Record<SkillLevel, string> = {
+  beginner: "gemini-1.5-flash",
+  veteran: "gemini-1.5-pro",
+};
+
 /**
  * Streams generated content from the Convex `/api/generate-debate` route.
- * Yields decoded text chunks as they arrive; throws on a non-2xx response.
+ * Yields decoded text chunks as they arrive; throws on a non-2xx response
+ * with the server's actual error detail (status + message).
  */
 export async function* streamGenerateDebate(
   args: GenerateDebateArgs,
@@ -55,17 +62,20 @@ export async function* streamGenerateDebate(
       committee: args.committee,
       skill: args.skill,
       prompt: args.prompt,
+      model: MODEL_BY_SKILL[args.skill],
     }),
     signal,
   });
 
   if (!response.ok) {
+    // Read the raw body once, then try JSON detail, then plain text.
+    const raw = await response.text().catch(() => "");
     let detail = "";
     try {
-      const payload = await response.json();
-      detail = payload?.error ?? "";
+      const payload = JSON.parse(raw);
+      detail = typeof payload?.error === "string" ? payload.error : "";
     } catch {
-      detail = await response.text().catch(() => "");
+      detail = raw.trim();
     }
     throw new Error(
       detail || `Generation request failed with status ${response.status}.`,

@@ -14,12 +14,15 @@
  *     mode: "interventions" | "poiVault" | "resolutions",
  *     committee: "un" | "loksabha" | "aippm",
  *     skill: "beginner" | "veteran",
- *     prompt: string
+ *     prompt: string,
+ *     model?: "gemini-1.5-flash" | "gemini-1.5-pro"  // optional, defaults by skill
  *   }
  *
  * The raw prompt plus the active Committee Mode and Experience Tier
  * selections are piped straight to Google, with a strict persona injected
- * per committee × skill combination (see PERSONAS below).
+ * per committee × skill combination (see PERSONAS below). Only the
+ * canonical model strings above are accepted; the model is resolved from
+ * the UI toggles (Experience Tier → flash for Beginner, pro for Veteran).
  *
  * Response: a text/plain streaming body, with CORS headers so the
  * dashboard can consume it from the browser.
@@ -27,7 +30,18 @@
 import { GoogleGenAI } from "@google/genai";
 import { httpAction } from "./_generated/server";
 
-const MODEL = "gemini-1.5-pro";
+/** Canonical production model strings — no aliases, no prefixes. */
+const CANONICAL_MODELS = ["gemini-1.5-flash", "gemini-1.5-pro"] as const;
+
+/** Model chosen by the Experience Tier toggle when the client does not
+ *  explicitly pass one: Beginner → flash (fast coaching), Veteran → pro. */
+const MODEL_BY_SKILL: Record<string, string> = {
+  beginner: "gemini-1.5-flash",
+  veteran: "gemini-1.5-pro",
+};
+
+/** Global generative language endpoint — the canonical Google AI path. */
+const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 
 // ---------------------------------------------------------------------------
 // Strict personas per dropdown combination (Committee Mode × Experience Tier)
@@ -112,6 +126,7 @@ export const generateDebate = httpAction(async (_ctx, request) => {
     committee?: unknown;
     skill?: unknown;
     prompt?: unknown;
+    model?: unknown;
   };
   try {
     body = await request.json();
@@ -123,6 +138,15 @@ export const generateDebate = httpAction(async (_ctx, request) => {
   const committee = typeof body.committee === "string" ? body.committee : "";
   const skill = typeof body.skill === "string" ? body.skill : "";
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+
+  // Resolve the model from the request if it is a canonical string, otherwise
+  // fall back to the Experience Tier mapping.
+  const requestedModel = typeof body.model === "string" ? body.model : "";
+  const model = CANONICAL_MODELS.includes(
+    requestedModel as (typeof CANONICAL_MODELS)[number],
+  )
+    ? requestedModel
+    : (MODEL_BY_SKILL[skill] ?? "gemini-1.5-pro");
 
   if (!mode || !committee || !skill || !prompt) {
     return jsonResponse(400, {
@@ -149,11 +173,16 @@ export const generateDebate = httpAction(async (_ctx, request) => {
     "Respond with only the requested content — no preamble, no commentary, no markdown headers.",
   ].join("\n\n");
 
-  const ai = new GoogleGenAI({ apiKey });
+  const ai = new GoogleGenAI({
+    apiKey,
+    // Pin the global generative language path so requests always hit the
+    // canonical REST route (never a stale or region-scoped base URL).
+    httpOptions: { baseUrl: GEMINI_BASE_URL },
+  });
 
   try {
     const stream = await ai.models.generateContentStream({
-      model: MODEL,
+      model,
       contents: prompt,
       config: { systemInstruction },
     });
@@ -191,8 +220,15 @@ export const generateDebate = httpAction(async (_ctx, request) => {
       },
     });
   } catch (error) {
+    const status =
+      error && typeof error === "object" && "status" in error
+        ? String((error as { status?: unknown }).status ?? "")
+        : "";
     const message =
       error instanceof Error ? error.message : "Unknown Gemini error";
-    return jsonResponse(502, { error: `Gemini request failed: ${message}` });
+    return jsonResponse(502, {
+      error: `Gemini request failed${status ? ` (${status})` : ""}: ${message}`,
+      model,
+    });
   }
 });
