@@ -1,0 +1,170 @@
+/* DO NOT CHANGE */
+@import "tailwindcss";
+@import "tw-animate-css";
+@custom-variant dark (&:is(.dark *));
+
+/* DO NOT CHANGE */
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+/* Papery editorial type system — serif-forward, newspaper hierarchy */
+@theme {
+  --font-serif: "Iowan Old Style", "Palatino Linotype", Georgia, "Times New Roman", serif;
+  --font-display: "Iowan Old Style", "Palatino Linotype", Georgia, "Times New Roman", serif;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* CHANGE VALUES FOR THEME — "Papery" edition: warm paper stock, thin ink rules,
+   deep navy elements, and a quiet electric-blue highlight. Inspired by
+   newspapers and editorial layouts. */
+:root {
+  --radius: 0.375rem;
+  --background: #f0eee6;        /* warm paper stock */
+  --foreground: #211f1a;        /* quiet ink */
+  --card: #f6f4ec;              /* slightly lifted paper */
+  --card-foreground: #211f1a;
+  --popover: #faf8f1;           /* dropdown / overlay paper */
+  --popover-foreground: #211f1a;
+  --primary: #16283f;           /* deep navy */
+  --primary-foreground: #f0eee6;
+  --secondary: #e6e3d7;         /* ink-washed paper */
+  --secondary-foreground: #211f1a;
+  --muted: #eae7db;
+  --muted-foreground: #6c685c;  /* faded ink */
+  --accent: #2f6bff;            /* electric blue highlight */
+  --accent-foreground: #f6f8ff;
+  --destructive: #9c3a2c;       /* printer's red */
+  --border: #d6d2c3;            /* thin hairline rule */
+  --input: #cfcabb;
+  --ring: #2f6bff;
+  --chart-1: #16283f;
+  --chart-2: #2f6bff;
+  --chart-3: #6c685c;
+  --chart-4: #b08d3f;
+  --chart-5: #9c3a2c;
+  --sidebar: #f5f3ea;
+  --sidebar-foreground: #211f1a;
+  --sidebar-primary: #16283f;
+  --sidebar-primary-foreground: #f0eee6;
+  --sidebar-accent: #e9e6da;
+  --sidebar-accent-foreground: #16283f;
+  --sidebar-border: #d6d2c3;
+  --sidebar-ring: #2f6bff;
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  button:not([disabled]),
+  [role="button"]:not([disabled]) {
+    cursor: pointer;
+  }
+}
+
+@layer components {
+  /* Editorial helpers — thin ink rules, masthead treatments */
+  .rule-thick-t {
+    border-top: 2px solid var(--foreground);
+  }
+  .rule-thin-b {
+    border-bottom: 1px solid var(--border);
+  }
+  .rule-double-b {
+    border-bottom: 3px double var(--border);
+  }
+  .masthead {
+    letter-spacing: 0.14em;
+    font-family: var(--font-display);
+    font-weight: 600;
+  }
+  .eyebrow {
+    font-family: var(--font-sans);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+  /* Newspaper drop cap for feature leads */
+  .drop-cap::first-letter {
+    float: left;
+    font-family: var(--font-display);
+    font-size: 3.4em;
+    line-height: 0.82;
+    padding-right: 0.09em;
+    padding-top: 0.04em;
+    font-weight: 600;
+  }
+}
