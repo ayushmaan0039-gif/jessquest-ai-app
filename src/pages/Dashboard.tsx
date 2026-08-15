@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { useMutation, useQuery } from "convex/react";
 import { useNavigate } from "react-router";
@@ -11,6 +11,7 @@ import type {
 import { useAuth } from "@/hooks/use-auth";
 import { DashboardHeader } from "@/components/dashboard/DashboardHeader";
 import { DashboardSidebar } from "@/components/dashboard/DashboardSidebar";
+import { ProductionSettings } from "@/components/dashboard/ProductionSettings";
 import { ChatView } from "@/components/chat/ChatView";
 import { COMMITTEES, SKILLS } from "@/components/dashboard/data";
 
@@ -19,6 +20,7 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const config = useQuery(api.config.getConfig);
   const setConfig = useMutation(api.config.setConfig);
+  const [view, setView] = useState<"chat" | "production">("chat");
 
   const committee: CommitteeFramework = config?.committeeFramework ?? "un";
   const skill: SkillLevel = config?.skillLevel ?? "beginner";
@@ -59,6 +61,10 @@ export default function Dashboard() {
         onSkillChange={(level) => updateConfig({ skillLevel: level })}
         user={user}
         onSignOut={handleSignOut}
+        onOpenSettings={() =>
+          setView((current) => (current === "production" ? "chat" : "production"))
+        }
+        settingsActive={view === "production"}
       />
 
       <DashboardSidebar
@@ -70,7 +76,11 @@ export default function Dashboard() {
 
       <div className="lg:pl-60">
         <main className="h-[calc(100vh-4rem)]">
-          <ChatView committee={committee} skill={skill} />
+          {view === "production" ? (
+            <ProductionSettings />
+          ) : (
+            <ChatView committee={committee} skill={skill} />
+          )}
         </main>
       </div>
     </div>

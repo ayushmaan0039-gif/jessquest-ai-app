@@ -1,5 +1,5 @@
 import { Link } from "react-router";
-import { ChevronDown, LogOut } from "lucide-react";
+import { ChevronDown, LogOut, Settings } from "lucide-react";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
@@ -46,6 +46,8 @@ export function DashboardHeader({
   onSkillChange,
   user,
   onSignOut,
+  onOpenSettings,
+  settingsActive = false,
 }: {
   committee: CommitteeFramework;
   skill: SkillLevel;
@@ -53,6 +55,8 @@ export function DashboardHeader({
   onSkillChange: (level: SkillLevel) => void;
   user: DashboardUser;
   onSignOut: () => void;
+  onOpenSettings?: () => void;
+  settingsActive?: boolean;
 }) {
   return (
     <header className="sticky top-0 z-40 h-16 border-b border-border bg-background/85 backdrop-blur-md">
@@ -179,7 +183,21 @@ export function DashboardHeader({
         </div>
 
         {/* User menu */}
-        <div className="flex shrink-0 items-center">
+        <div className="flex shrink-0 items-center gap-1.5">
+          {onOpenSettings && (
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              aria-label="Production settings"
+              className={`grid size-9 place-items-center rounded-full border transition-colors ${
+                settingsActive
+                  ? "border-accent/50 bg-accent/15 text-accent"
+                  : "border-white/10 bg-white/5 text-muted-foreground hover:bg-white/10 hover:text-foreground"
+              }`}
+            >
+              <Settings className="size-4" />
+            </button>
+          )}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
