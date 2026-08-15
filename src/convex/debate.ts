@@ -1,13 +1,12 @@
 /**
  * `/api/generate-debate` — server-side Gemini streaming endpoint.
  *
- * Reads the API key from the environment (in order of preference):
+ * Implements the call to Google with a RAW HTTP fetch() — no SDK, no client
+ * libraries. The key is read from the environment (in order of preference):
  *   process.env.VITE_GEMINI_API_KEY
  *   process.env.GEMINI_API_KEY          (fallback)
  *
  * Set `VITE_GEMINI_API_KEY` in Freebuff → project Keys/API keys tab.
- * The model used is `gemini-1.5-pro`, streaming tokens as they are
- * generated back to the chat capsule.
  *
  * Request body (JSON):
  *   {
@@ -19,15 +18,14 @@
  *   }
  *
  * The raw prompt plus the active Committee Mode and Experience Tier
- * selections are piped straight to Google, with a strict persona injected
- * per committee × skill combination (see PERSONAS below). Only the
- * canonical model strings above are accepted; the model is resolved from
- * the UI toggles (Experience Tier → flash for Beginner, pro for Veteran).
+ * selections are piped straight to Google. A strict persona is injected per
+ * committee × skill combination (see PERSONAS below). Only the canonical
+ * model strings are accepted; the model is resolved from the Experience
+ * Tier toggle (Beginner → gemini-1.5-flash, Veteran → gemini-1.5-pro).
  *
- * Response: a text/plain streaming body, with CORS headers so the
- * dashboard can consume it from the browser.
+ * Response: a text/plain streaming body (SSE frames decoded), with CORS
+ * headers so the dashboard can consume it from the browser.
  */
-import { GoogleGenAI } from "@google/genai";
 import { httpAction } from "./_generated/server";
 
 /** Canonical production model strings — no aliases, no prefixes. */
@@ -103,6 +101,78 @@ function jsonResponse(
   });
 }
 
+/** Pulls the incremental text out of a Gemini streaming frame. */
+function extractStreamText(payload: unknown): string {
+  if (typeof payload !== "object" || payload === null) return "";
+  const data = payload as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    text?: string;
+  };
+  const candidates = data.candidates;
+  if (Array.isArray(candidates)) {
+    const parts = candidates[0]?.content?.parts;
+    if (Array.isArray(parts)) {
+      return parts
+        .map((part) => (typeof part?.text === "string" ? part.text : ""))
+        .join("");
+    }
+  }
+  return typeof data.text === "string" ? data.text : "";
+}
+
+/**
+ * Converts Google's SSE stream into a plain text stream. Each `data:`
+ * frame is parsed and its incremental text is forwarded downstream.
+ */
+function sseToTextStream(upstream: ReadableStream<Uint8Array>) {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        const reader = upstream.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          let newlineIndex: number;
+          while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, newlineIndex).trim();
+            buffer = buffer.slice(newlineIndex + 1);
+            if (!line.startsWith("data:")) continue;
+
+            const frame = line.slice(5).trim();
+            if (!frame || frame === "[DONE]") continue;
+
+            try {
+              const text = extractStreamText(JSON.parse(frame));
+              if (text) {
+                controller.enqueue(encoder.encode(text));
+              }
+            } catch {
+              // Malformed frame — skip it, keep streaming.
+            }
+          }
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unknown stream error";
+        controller.enqueue(
+          encoder.encode(`\n[Generation interrupted: ${message}]`),
+        );
+      } finally {
+        controller.close();
+      }
+    },
+    cancel() {
+      // Client disconnected — stop consuming the upstream stream.
+    },
+  });
+}
+
 export const generateDebate = httpAction(async (_ctx, request) => {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -173,62 +243,68 @@ export const generateDebate = httpAction(async (_ctx, request) => {
     "Respond with only the requested content — no preamble, no commentary, no markdown headers.",
   ].join("\n\n");
 
-  const ai = new GoogleGenAI({
-    apiKey,
-    // Pin the global generative language path so requests always hit the
-    // canonical REST route (never a stale or region-scoped base URL).
-    httpOptions: { baseUrl: GEMINI_BASE_URL },
-  });
+  // -------------------------------------------------------------------------
+  // RAW fetch() to Google's official streaming endpoint — no SDK involved.
+  // -------------------------------------------------------------------------
+  const endpoint =
+    `${GEMINI_BASE_URL}/v1beta/models/${model}:streamGenerateContent` +
+    `?alt=sse&key=${encodeURIComponent(apiKey)}`;
 
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    systemInstruction: { parts: [{ text: systemInstruction }] },
+  };
+
+  let upstream: Response;
   try {
-    const stream = await ai.models.generateContentStream({
-      model,
-      contents: prompt,
-      config: { systemInstruction },
-    });
-
-    const encoder = new TextEncoder();
-    const readable = new ReadableStream({
-      async start(controller) {
-        try {
-          for await (const chunk of stream) {
-            const text = chunk.text;
-            if (text) {
-              controller.enqueue(encoder.encode(text));
-            }
-          }
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : "Unknown stream error";
-          controller.enqueue(
-            encoder.encode(`\n[Generation interrupted: ${message}]`),
-          );
-        } finally {
-          controller.close();
-        }
-      },
-      cancel() {
-        // Client disconnected — stop consuming the upstream stream.
-      },
-    });
-
-    return new Response(readable, {
-      headers: {
-        ...CORS_HEADERS,
-        "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-cache",
-      },
+    upstream = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
   } catch (error) {
-    const status =
-      error && typeof error === "object" && "status" in error
-        ? String((error as { status?: unknown }).status ?? "")
-        : "";
     const message =
-      error instanceof Error ? error.message : "Unknown Gemini error";
+      error instanceof Error ? error.message : "Unknown network error";
     return jsonResponse(502, {
-      error: `Gemini request failed${status ? ` (${status})` : ""}: ${message}`,
+      error: `Gemini network request failed: ${message}`,
       model,
     });
   }
+
+  // Error safety net: surface Google's exact error message, never a generic
+  // 404 block.
+  if (!upstream.ok) {
+    let detail = "";
+    try {
+      const errorJson = await upstream.json();
+      const error = errorJson as {
+        error?: { message?: string; status?: string };
+      };
+      detail =
+        error?.error?.message ??
+        error?.error?.status ??
+        JSON.stringify(errorJson);
+    } catch {
+      detail = (await upstream.text().catch(() => "")).trim();
+    }
+    return jsonResponse(502, {
+      error: `Gemini request failed (${upstream.status}): ${detail}`,
+      model,
+    });
+  }
+
+  if (!upstream.body) {
+    return jsonResponse(502, {
+      error: "Gemini returned an empty stream.",
+      model,
+    });
+  }
+
+  return new Response(sseToTextStream(upstream.body), {
+    headers: {
+      ...CORS_HEADERS,
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-cache",
+    },
+  });
 });

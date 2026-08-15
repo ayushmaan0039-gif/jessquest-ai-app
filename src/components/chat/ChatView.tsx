@@ -43,6 +43,7 @@ export function ChatView({
     mode: DebateMode;
     text: string;
   } | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
   const streamRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -57,6 +58,7 @@ export function ChatView({
 
       const mode = detectMode(text);
       setIsStreaming(true);
+      setStreamError(null);
       setPrompt("");
 
       try {
@@ -95,9 +97,10 @@ export function ChatView({
         }
       } catch (error) {
         if (!controller.signal.aborted) {
-          toast.error(
-            error instanceof Error ? error.message : "Generation failed.",
-          );
+          const message =
+            error instanceof Error ? error.message : "Generation failed.";
+          setStreamError(message);
+          toast.error(message);
         }
       } finally {
         streamRef.current = null;
@@ -211,6 +214,18 @@ export function ChatView({
                         <span className="ml-0.5 inline-block h-4 w-2 animate-pulse bg-accent align-middle" />
                       )}
                     </div>
+                  </div>
+                )}
+
+                {/* Exact upstream error, printed straight onto the console */}
+                {streamError && (
+                  <div className="rounded-2xl border border-destructive/30 bg-destructive/10 p-4">
+                    <p className="text-[13px] font-semibold text-destructive">
+                      Generation failed
+                    </p>
+                    <p className="mt-1.5 font-mono text-[12px] leading-5 text-destructive/90 whitespace-pre-wrap">
+                      {streamError}
+                    </p>
                   </div>
                 )}
 
