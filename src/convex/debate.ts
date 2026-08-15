@@ -14,28 +14,34 @@
  *     committee: "un" | "loksabha" | "aippm",
  *     skill: "beginner" | "veteran",
  *     prompt: string,
- *     model?: "gemini-1.5-flash" | "gemini-1.5-pro"  // optional, defaults by skill
+ *     model?: "gemini-1.5-flash" | "gemini-1.5-pro-latest"  // optional, defaults by skill
  *   }
  *
  * The raw prompt plus the active Committee Mode and Experience Tier
  * selections are piped straight to Google. A strict persona is injected per
  * committee × skill combination (see PERSONAS below). Only the canonical
- * model strings are accepted; the model is resolved from the Experience
- * Tier toggle (Beginner → gemini-1.5-flash, Veteran → gemini-1.5-pro).
+ * production alias strings are accepted; the model is resolved from the
+ * Experience Tier toggle (Beginner → gemini-1.5-flash, Veteran →
+ * gemini-1.5-pro-latest).
  *
  * Response: a text/plain streaming body (SSE frames decoded), with CORS
  * headers so the dashboard can consume it from the browser.
  */
 import { httpAction } from "./_generated/server";
 
-/** Canonical production model strings — no aliases, no prefixes. */
-const CANONICAL_MODELS = ["gemini-1.5-flash", "gemini-1.5-pro"] as const;
+/** Stable production model aliases — synchronized with the frontend toggle
+ *  bindings in `src/lib/gemini.ts`. No raw/variant strings. */
+const CANONICAL_MODELS = [
+  "gemini-1.5-flash",
+  "gemini-1.5-pro-latest",
+] as const;
 
 /** Model chosen by the Experience Tier toggle when the client does not
- *  explicitly pass one: Beginner → flash (fast coaching), Veteran → pro. */
+ *  explicitly pass one: Beginner → flash (fast coaching), Veteran → the
+ *  stable 1.5 Pro production alias. */
 const MODEL_BY_SKILL: Record<string, string> = {
   beginner: "gemini-1.5-flash",
-  veteran: "gemini-1.5-pro",
+  veteran: "gemini-1.5-pro-latest",
 };
 
 /** Global generative language endpoint — the canonical Google AI path. */
@@ -216,7 +222,7 @@ export const generateDebate = httpAction(async (_ctx, request) => {
     requestedModel as (typeof CANONICAL_MODELS)[number],
   )
     ? requestedModel
-    : (MODEL_BY_SKILL[skill] ?? "gemini-1.5-pro");
+    : (MODEL_BY_SKILL[skill] ?? "gemini-1.5-pro-latest");
 
   if (!mode || !committee || !skill || !prompt) {
     return jsonResponse(400, {

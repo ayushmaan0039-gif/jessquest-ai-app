@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
@@ -50,6 +51,20 @@ export function ChatView({
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, live]);
+
+  // Wipe any cached error banner / live stream out of the DOM memory when the
+  // dropdown track changes, so the next payload streams fresh.
+  useEffect(() => {
+    streamRef.current?.abort();
+    setLive(null);
+    setIsStreaming(false);
+    setStreamError(null);
+  }, [committee, skill]);
+
+  // Abort any in-flight stream if the chat view unmounts.
+  useEffect(() => {
+    return () => streamRef.current?.abort();
+  }, []);
 
   const send = useCallback(
     async (raw: string) => {
@@ -219,11 +234,19 @@ export function ChatView({
 
                 {/* Exact upstream error, printed straight onto the console */}
                 {streamError && (
-                  <div className="rounded-2xl border border-destructive/30 bg-destructive/10 p-4">
+                  <div className="relative rounded-2xl border border-destructive/30 bg-destructive/10 p-4 pr-10">
+                    <button
+                      type="button"
+                      onClick={() => setStreamError(null)}
+                      className="absolute right-3 top-3 grid size-6 place-items-center rounded-full text-destructive/70 transition-colors hover:bg-destructive/10 hover:text-destructive"
+                      aria-label="Dismiss error"
+                    >
+                      <X className="size-3.5" />
+                    </button>
                     <p className="text-[13px] font-semibold text-destructive">
                       Generation failed
                     </p>
-                    <p className="mt-1.5 font-mono text-[12px] leading-5 text-destructive/90 whitespace-pre-wrap">
+                    <p className="mt-1.5 font-mono text-[12px] leading-5 whitespace-pre-wrap text-destructive/90">
                       {streamError}
                     </p>
                   </div>

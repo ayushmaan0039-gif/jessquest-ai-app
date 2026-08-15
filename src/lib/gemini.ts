@@ -37,10 +37,11 @@ export type GenerateDebateArgs = {
   prompt: string;
 };
 
-/** Canonical production model strings, chosen by the Experience Tier toggle. */
+/** Stable production model aliases, bound to the Experience Tier toggle.
+ *  Must stay synchronized with `CANONICAL_MODELS` in `src/convex/debate.ts`. */
 export const MODEL_BY_SKILL: Record<SkillLevel, string> = {
   beginner: "gemini-1.5-flash",
-  veteran: "gemini-1.5-pro",
+  veteran: "gemini-1.5-pro-latest",
 };
 
 /**
