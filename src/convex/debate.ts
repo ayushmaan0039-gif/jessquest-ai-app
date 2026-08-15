@@ -17,11 +17,12 @@
  *   Endpoint : https://openrouter.ai/api/v1/chat/completions
  *              (OpenRouter's official API path — the bare openrouter.ai host
  *              serves their website, not the API.)
- *   Model    : google/gemma-4-31b-it:free — a live, $0 free model from
- *              OpenRouter's catalog. NOTE: the previously requested
- *              `meta-llama/llama-3-8b-instruct:free` has been retired from
- *              OpenRouter (no :free llama models remain); gemma-4-31b-it:free
- *              is the live free equivalent for long-form drafting.
+ *   Model    : nvidia/nemotron-3-nano-30b-a3b:free — a live, $0 free model
+ *              from OpenRouter's catalog, chosen for low traffic on the free
+ *              pool. If it 429s, the core automatically retries two smaller
+ *              live free models before surfacing the error. NOTE: the
+ *              previously requested `meta-llama/llama-3-8b-instruct:free` is
+ *              retired from OpenRouter (no :free llama models remain).
  *   Headers  : Content-Type, HTTP-Referer, X-Title (public identity headers).
  *   Auth     : OpenRouter requires a free account API key (sk-or-v1-…) even
  *              for :free models — the model itself costs $0. When
@@ -48,10 +49,23 @@ import {
 } from "./shared";
 
 /**
- * Canonical model identifiers. `google/gemma-4-31b-it:free` is a live,
- * $0 free model on OpenRouter's public catalog.
+ * Canonical model identifiers. `nvidia/nemotron-3-nano-30b-a3b:free` is a
+ * live, $0 free model on OpenRouter's public catalog — a fast 30B MoE
+ * (3B active) with far less traffic than the Gemma/GPT-OSS free pools.
+ * (The previously requested `meta-llama/llama-3-8b-instruct:free` is
+ * retired — no :free llama models remain on OpenRouter.)
  */
-const CANONICAL_MODELS = ["google/gemma-4-31b-it:free"] as const;
+const CANONICAL_MODELS = ["nvidia/nemotron-3-nano-30b-a3b:free"] as const;
+
+/**
+ * Automatic 429 fallback chain: if the primary free model is rate-limited,
+ * try successively smaller/less-contended free models to bypass the traffic.
+ * All are verified live in OpenRouter's catalog.
+ */
+const FREE_FALLBACK_MODELS = [
+  "liquid/lfm-2.5-2.6b:free",
+  "dots-studio/dots-3-note-preview:free",
+] as const;
 
 /** Valid dropdown values, used for strict request validation (must match
  *  `CommitteeFramework` / `SkillLevel` in `src/convex/shared.ts`). */
@@ -61,8 +75,8 @@ const SKILLS = ["beginner", "veteran"] as const;
 /** Model chosen per Experience Tier — one free engine, tuned by the persona
  *  matrix instead. */
 const MODEL_BY_SKILL: Record<string, string> = {
-  beginner: "google/gemma-4-31b-it:free",
-  veteran: "google/gemma-4-31b-it:free",
+  beginner: "nvidia/nemotron-3-nano-30b-a3b:free",
+  veteran: "nvidia/nemotron-3-nano-30b-a3b:free",
 };
 
 /** OpenRouter's official API base (chat completions live under /api/v1). */
@@ -118,7 +132,7 @@ function resolveModel(skill: string, requested?: string): string {
   if (requested && CANONICAL_MODELS.includes(requested as never)) {
     return requested;
   }
-  return MODEL_BY_SKILL[skill] ?? "google/gemma-4-31b-it:free";
+  return MODEL_BY_SKILL[skill] ?? "nvidia/nemotron-3-nano-30b-a3b:free";
 }
 
 /** Builds the strict system instruction for the selected chamber × tier. */
@@ -218,35 +232,12 @@ async function consumeSse(
 // THE CORE — one direct fetch() to OpenRouter's public network
 // ---------------------------------------------------------------------------
 
-async function generateText(
-  args: {
-    model: string;
-    systemInstruction: string;
-    prompt: string;
-  },
+/** Executes one streaming request against OpenRouter with the given model. */
+async function streamFromOpenRouter(
+  payload: Record<string, unknown>,
+  apiKey: string,
   onChunk?: (chunk: string) => void | Promise<unknown>,
 ): Promise<string> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-
-  // OpenRouter requires a free account API key even for :free models — the
-  // model itself costs $0, but there is no anonymous endpoint. Surface this
-  // clearly instead of letting OpenRouter reply with a bare 401.
-  if (!apiKey) {
-    throw new Error(
-      "OPENROUTER_API_KEY is not configured. OpenRouter requires a free account API key (sk-or-v1-…) even for $0 :free models — add it in the project Keys/API keys tab.",
-    );
-  }
-
-  const payload = {
-    model: args.model,
-    messages: [
-      { role: "system", content: args.systemInstruction },
-      { role: "user", content: args.prompt },
-    ],
-    stream: true,
-    temperature: 0.7,
-  };
-
   let upstream: Response;
   try {
     upstream = await fetch(`${OPENROUTER_API_BASE}/chat/completions`, {
@@ -258,7 +249,7 @@ async function generateText(
         "X-Title": OPENROUTER_TITLE,
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(25000),
+      signal: AbortSignal.timeout(60000),
     });
   } catch (error) {
     const message =
@@ -280,6 +271,60 @@ async function generateText(
   }
 
   return consumeSse(upstream.body, onChunk);
+}
+
+async function generateText(
+  args: {
+    model: string;
+    systemInstruction: string;
+    prompt: string;
+  },
+  onChunk?: (chunk: string) => void | Promise<unknown>,
+): Promise<string> {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+
+  // OpenRouter requires a free account API key even for :free models — the
+  // model itself costs $0, but there is no anonymous endpoint. Surface this
+  // clearly instead of letting OpenRouter reply with a bare 401.
+  if (!apiKey) {
+    throw new Error(
+      "OPENROUTER_API_KEY is not configured. OpenRouter requires a free account API key (sk-or-v1-…) even for $0 :free models — add it in the project Keys/API keys tab.",
+    );
+  }
+
+  // 429-bypass chain: try the primary free model, then progressively smaller
+  // live free models when the provider rate-limits (429) under traffic.
+  const models = [args.model, ...FREE_FALLBACK_MODELS];
+  let lastError: Error | null = null;
+
+  for (const model of models) {
+    const payload = {
+      model,
+      messages: [
+        { role: "system", content: args.systemInstruction },
+        { role: "user", content: args.prompt },
+      ],
+      stream: true,
+      temperature: 0.7,
+    };
+
+    try {
+      return await streamFromOpenRouter(payload, apiKey, onChunk);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      // Fall through to the next free model on provider rate limits (429)
+      // and on first-byte timeouts (free pools queue when busy). Auth,
+      // model-not-found and other errors surface immediately.
+      const retryable =
+        /request failed \(429\)/.test(lastError.message) ||
+        /AbortError|aborted|timed out|timeout/i.test(lastError.message);
+      if (!retryable) break;
+    }
+  }
+
+  throw new Error(
+    `${lastError?.message ?? "Generation failed."} Tried free models: ${models.join(", ")}. Free-tier pools are heavily shared — retry shortly or add a small OpenRouter credit for priority routing.`,
+  );
 }
 
 // ---------------------------------------------------------------------------
