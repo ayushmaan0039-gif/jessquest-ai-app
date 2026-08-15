@@ -193,7 +193,7 @@ export default function Landing() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.55, delay: 0.12, ease: "easeOut" }}
           >
-            <div className="border border-border bg-card shadow-[4px_4px_0_rgba(33,31,26,0.08)]">
+            <div className="border border-white/10 bg-card shadow-[0_24px_80px_rgba(0,0,0,0.5)]">
               <div className="border-b-2 border-foreground px-5 py-3 text-center">
                 <p className="masthead text-sm tracking-[0.3em]">THE FLOOR</p>
                 <p className="mt-1 text-[9px] uppercase tracking-[0.2em] text-muted-foreground">

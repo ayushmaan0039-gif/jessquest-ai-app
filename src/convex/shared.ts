@@ -6,6 +6,23 @@
 import { v } from "convex/values";
 
 // ---------------------------------------------------------------------------
+// Chat modes (which drafting discipline the model is tuned to)
+// ---------------------------------------------------------------------------
+
+export const DEBATE_MODES = [
+  "interventions",
+  "poiVault",
+  "resolutions",
+] as const;
+export type DebateMode = (typeof DEBATE_MODES)[number];
+
+export const chatModeValidator = v.union(
+  v.literal("interventions"),
+  v.literal("poiVault"),
+  v.literal("resolutions"),
+);
+
+// ---------------------------------------------------------------------------
 // Committee frameworks
 // ---------------------------------------------------------------------------
 

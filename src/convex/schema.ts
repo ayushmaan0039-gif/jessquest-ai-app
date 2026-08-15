@@ -3,6 +3,7 @@ import { defineSchema, defineTable } from "convex/server";
 import { Infer, v } from "convex/values";
 import {
   activeTabValidator,
+  chatModeValidator,
   committeeFrameworkValidator,
   interventionStatusValidator,
   interventionTypeValidator,
@@ -92,6 +93,17 @@ const schema = defineSchema(
       status: resolutionStatusValidator,
       createdAt: v.number(),
       updatedAt: v.number(),
+    }).index("by_userId", ["userId"]),
+
+    // Chat history for the debate assistant (user prompts + AI responses).
+    chatMessages: defineTable({
+      userId: v.id("users"),
+      role: v.union(v.literal("user"), v.literal("assistant")),
+      content: v.string(),
+      mode: chatModeValidator,
+      committeeFramework: committeeFrameworkValidator,
+      skillLevel: skillLevelValidator,
+      createdAt: v.number(),
     }).index("by_userId", ["userId"]),
   },
   {

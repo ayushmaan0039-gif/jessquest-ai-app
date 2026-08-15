@@ -1,13 +1,7 @@
 import { Link } from "react-router";
-import {
-  ChevronDown,
-  Gauge,
-  Landmark,
-  LogOut,
-} from "lucide-react";
-import { Wordmark } from "@/components/BrandMark";
+import { ChevronDown, LogOut } from "lucide-react";
+import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -29,6 +23,12 @@ type DashboardUser = {
   email?: string | null;
   image?: string | null;
 } | null | undefined;
+
+const COMMITTEE_HEADER_LABELS: Record<CommitteeFramework, string> = {
+  un: "UN Committee",
+  loksabha: "Lok Sabha",
+  aippm: "AIPPM",
+};
 
 function getInitials(user: DashboardUser): string {
   const source = user?.name ?? user?.email ?? "D";
@@ -55,42 +55,47 @@ export function DashboardHeader({
   onSignOut: () => void;
 }) {
   return (
-    <header className="sticky top-0 z-40 border-b border-border bg-background/95 backdrop-blur-sm">
-      <div className="flex h-16 items-center justify-between gap-3 px-4 lg:px-6">
+    <header className="sticky top-0 z-40 h-16 border-b border-border bg-background/85 backdrop-blur-md">
+      <div className="relative flex h-16 items-center justify-between gap-3 px-4 lg:px-6">
+        {/* Brand */}
         <Link
           to="/"
           className="shrink-0 transition-opacity hover:opacity-80"
           aria-label="MUN Apex AI — home"
         >
-          <Wordmark compact />
+          <span className="hidden md:block">
+            <Wordmark compact />
+          </span>
+          <span className="block md:hidden">
+            <BrandMark className="size-8" />
+          </span>
         </Link>
 
-        <div className="flex min-w-0 items-center justify-end gap-2 sm:gap-3">
-          {/* Committee Framework */}
+        {/* Centered global toggles — sleek, borderless, dark */}
+        <div className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button
-                variant="outline"
-                className="h-auto gap-2 rounded-md border-border bg-card px-3 py-2 shadow-xs"
+              <button
+                type="button"
+                className="flex items-center gap-2 rounded-xl px-3 py-1.5 transition-colors hover:bg-white/5"
                 aria-label="Committee Framework"
               >
-                <Landmark className="size-4 shrink-0 text-primary" />
                 <span className="flex flex-col items-start leading-tight">
-                  <span className="hidden text-[9px] font-semibold uppercase tracking-[0.18em] text-muted-foreground lg:block">
+                  <span className="hidden text-[9px] font-semibold uppercase tracking-[0.18em] text-muted-foreground md:block">
                     Committee Framework
                   </span>
-                  <span className="text-xs font-semibold">
-                    {COMMITTEES[committee].short}
+                  <span className="flex items-center gap-1 text-[13px] font-medium text-foreground">
+                    {COMMITTEE_HEADER_LABELS[committee]}
+                    <ChevronDown className="size-3.5 text-muted-foreground" />
                   </span>
                 </span>
-                <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-              </Button>
+              </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent
-              align="end"
-              className="w-[min(320px,calc(100vw-2rem))] rounded-md border-border bg-popover"
+              align="center"
+              className="w-72 rounded-xl border-white/10 bg-popover/95 shadow-2xl backdrop-blur-xl"
             >
-              <DropdownMenuLabel className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+              <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                 Committee Framework
               </DropdownMenuLabel>
               <DropdownMenuRadioGroup
@@ -104,11 +109,11 @@ export function DashboardHeader({
                     <DropdownMenuRadioItem
                       key={key}
                       value={key}
-                      className="cursor-pointer items-start gap-3 py-2.5 pl-8"
+                      className="cursor-pointer items-start gap-3 rounded-lg py-2.5 pl-8 focus:bg-white/5"
                     >
                       <span className="flex flex-col">
-                        <span className="text-[13px] font-semibold leading-tight">
-                          {COMMITTEES[key].label}
+                        <span className="text-[13px] font-semibold leading-tight text-foreground">
+                          {COMMITTEE_HEADER_LABELS[key]}
                         </span>
                         <span className="mt-1 text-[11px] leading-4 text-muted-foreground">
                           {COMMITTEES[key].tagline}
@@ -121,47 +126,45 @@ export function DashboardHeader({
             </DropdownMenuContent>
           </DropdownMenu>
 
-          {/* Skill Level */}
+          <span className="mx-1 hidden h-5 w-px bg-white/10 sm:block" />
+
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button
-                variant="outline"
-                className="h-auto gap-2 rounded-md border-border bg-card px-3 py-2 shadow-xs"
-                aria-label="Skill Level"
+              <button
+                type="button"
+                className="flex items-center gap-2 rounded-xl px-3 py-1.5 transition-colors hover:bg-white/5"
+                aria-label="Experience Tier"
               >
-                <Gauge className="size-4 shrink-0 text-primary" />
                 <span className="flex flex-col items-start leading-tight">
-                  <span className="hidden text-[9px] font-semibold uppercase tracking-[0.18em] text-muted-foreground lg:block">
-                    Skill Level
+                  <span className="hidden text-[9px] font-semibold uppercase tracking-[0.18em] text-muted-foreground md:block">
+                    Experience Tier
                   </span>
-                  <span className="text-xs font-semibold">
+                  <span className="flex items-center gap-1 text-[13px] font-medium text-foreground">
                     {SKILLS[skill].label}
+                    <ChevronDown className="size-3.5 text-muted-foreground" />
                   </span>
                 </span>
-                <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-              </Button>
+              </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent
-              align="end"
-              className="w-64 rounded-md border-border bg-popover"
+              align="center"
+              className="w-64 rounded-xl border-white/10 bg-popover/95 shadow-2xl backdrop-blur-xl"
             >
-              <DropdownMenuLabel className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                Skill Level
+              <DropdownMenuLabel className="text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                Experience Tier
               </DropdownMenuLabel>
               <DropdownMenuRadioGroup
                 value={skill}
-                onValueChange={(value) =>
-                  onSkillChange(value as SkillLevel)
-                }
+                onValueChange={(value) => onSkillChange(value as SkillLevel)}
               >
                 {(Object.keys(SKILLS) as SkillLevel[]).map((key) => (
                   <DropdownMenuRadioItem
                     key={key}
                     value={key}
-                    className="cursor-pointer items-start gap-3 py-2.5 pl-8"
+                    className="cursor-pointer items-start gap-3 rounded-lg py-2.5 pl-8 focus:bg-white/5"
                   >
                     <span className="flex flex-col">
-                      <span className="text-[13px] font-semibold leading-tight">
+                      <span className="text-[13px] font-semibold leading-tight text-foreground">
                         {SKILLS[key].label}
                       </span>
                       <span className="mt-1 text-[11px] leading-4 text-muted-foreground">
@@ -173,20 +176,20 @@ export function DashboardHeader({
               </DropdownMenuRadioGroup>
             </DropdownMenuContent>
           </DropdownMenu>
+        </div>
 
-          <span className="hidden h-6 w-px bg-border sm:block" />
-
-          {/* User menu */}
+        {/* User menu */}
+        <div className="flex shrink-0 items-center">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
-                className="flex items-center gap-1.5 rounded-md border border-border bg-card px-1.5 py-1.5 shadow-xs transition-colors hover:bg-muted"
+                className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-1.5 py-1.5 transition-colors hover:bg-white/10"
                 aria-label="Account menu"
               >
                 <Avatar className="size-7">
                   <AvatarImage src={user?.image ?? undefined} alt="" />
-                  <AvatarFallback className="bg-primary text-[10px] font-bold text-primary-foreground">
+                  <AvatarFallback className="bg-accent/20 text-[10px] font-bold text-accent">
                     {getInitials(user)}
                   </AvatarFallback>
                 </Avatar>
@@ -195,7 +198,7 @@ export function DashboardHeader({
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="end"
-              className="w-64 rounded-md border-border bg-popover"
+              className="w-64 rounded-xl border-white/10 bg-popover/95 shadow-2xl backdrop-blur-xl"
             >
               <DropdownMenuLabel className="flex flex-col gap-0.5">
                 <span className="text-sm font-semibold">
@@ -207,11 +210,11 @@ export function DashboardHeader({
                   </span>
                 )}
               </DropdownMenuLabel>
-              <DropdownMenuSeparator />
+              <DropdownMenuSeparator className="bg-white/10" />
               <DropdownMenuItem
                 onSelect={onSignOut}
                 variant="destructive"
-                className="cursor-pointer"
+                className="cursor-pointer rounded-lg focus:bg-white/5"
               >
                 <LogOut />
                 Sign out

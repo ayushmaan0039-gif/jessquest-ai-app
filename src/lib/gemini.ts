@@ -1,9 +1,34 @@
 import type {
   CommitteeFramework,
+  DebateMode,
   SkillLevel,
 } from "@/convex/shared";
 
-export type DebateMode = "interventions" | "poiVault" | "resolutions";
+export type { DebateMode };
+
+/**
+ * Sniffs which drafting discipline a prompt belongs to so the assistant can
+ * be tuned to the right module: interventions, POI/cross-examination, or
+ * resolution drafting.
+ */
+export function detectMode(prompt: string): DebateMode {
+  const text = prompt.toLowerCase();
+  if (
+    /(poi|point of information|cross[- ]?exam|question|trap|interrupt|ask)/.test(
+      text,
+    )
+  ) {
+    return "poiVault";
+  }
+  if (
+    /(resolution|clause|draft|amendment|operative|preambul|resolution|bill)/.test(
+      text,
+    )
+  ) {
+    return "resolutions";
+  }
+  return "interventions";
+}
 
 export type GenerateDebateArgs = {
   mode: DebateMode;
