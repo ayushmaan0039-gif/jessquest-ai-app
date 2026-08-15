@@ -2,13 +2,18 @@
  * `/api/generate-debate` — server-side DeepSeek-V3 streaming endpoint.
  *
  * No external AI SDK, no external fetch route, and no external key of any
- * kind. Generation flows through Freebuff's native, built-in AI gateway — the same
- * endpoint the `@vly-ai/integrations` SDK targets — authenticated with the
- * deployment token that is injected automatically during project creation:
+ * kind. Generation flows through Freebuff's native, built-in AI gateway — the
+ * same endpoint the `@vly-ai/integrations` SDK targets — authenticated with
+ * the deployment token that is injected automatically during project creation:
  *
  *   process.env.VLY_INTEGRATION_KEY   (auto-set, format `sk_*`)
  *   process.env.VLY_INTEGRATION_BASE_URL (optional override; default is the
  *   gateway base the SDK ships with, https://integrations.vly.ai/v1/llm)
+ *
+ * If the gateway rejects the deployment token (platform provisioning issue),
+ * the handler automatically falls back to DeepSeek's OFFICIAL API
+ * (https://api.deepseek.com, model `deepseek-chat` = DeepSeek-V3) when
+ * `DEEPSEEK_API_KEY` is configured in the project Keys/API keys tab.
  *
  * Request body (JSON):
  *   {
@@ -38,10 +43,15 @@ import { httpAction } from "./_generated/server";
 
 /**
  * Canonical DeepSeek model identifiers. `deepseek-chat` is DeepSeek's
- * production alias for DeepSeek-V3 (the identifier their API and the AI SDK
- * gateway expect). No Google model strings exist anywhere in this file.
+ * production alias for DeepSeek-V3 (the identifier both DeepSeek's official
+ * API and the gateway expect).
  */
 const CANONICAL_MODELS = ["deepseek-chat"] as const;
+
+/** Valid dropdown values, used for strict request validation (must match
+ *  `CommitteeFramework` / `SkillLevel` in `src/convex/shared.ts`). */
+const COMMITTEES = ["un", "loksabha", "aippm"] as const;
+const SKILLS = ["beginner", "veteran"] as const;
 
 /** Model chosen per Experience Tier (both resolve to DeepSeek-V3 — one
  *  engine, tuned by the persona matrix instead). Synchronized with the
@@ -51,11 +61,13 @@ const MODEL_BY_SKILL: Record<string, string> = {
   veteran: "deepseek-chat",
 };
 
+/** Official DeepSeek API (OpenAI-compatible). Model `deepseek-chat` = V3. */
+const DEEPSEEK_API_BASE = "https://api.deepseek.com";
+
 /**
- * Resolves the gateway base for chat completions. Honors
- * `VLY_INTEGRATION_BASE_URL` if the platform set it (per integrations.md the
- * default is https://integrations.freebuff.com/), otherwise falls back to the
- * exact base URL the `@vly-ai/integrations` SDK ships with
+ * Resolves the Freebuff gateway base for chat completions. Honors
+ * `VLY_INTEGRATION_BASE_URL` if the platform set it, otherwise falls back to
+ * the exact base URL the `@vly-ai/integrations` SDK ships with
  * (https://integrations.vly.ai/v1/llm). `/v1/llm` is appended if missing so
  * both forms work.
  */
@@ -148,7 +160,7 @@ function extractStreamText(payload: unknown): string {
 }
 
 /**
- * Converts the gateway's SSE stream into a plain text stream. Each `data:`
+ * Converts the upstream SSE stream into a plain text stream. Each `data:`
  * frame is parsed and its incremental text is forwarded downstream.
  */
 function sseToTextStream(upstream: ReadableStream<Uint8Array>) {
@@ -200,6 +212,22 @@ function sseToTextStream(upstream: ReadableStream<Uint8Array>) {
   });
 }
 
+/** Parses the exact error body an OpenAI-compatible provider returns. */
+async function extractUpstreamError(upstream: Response): Promise<string> {
+  try {
+    const errorJson = (await upstream.json()) as {
+      error?: { message?: string; status?: string };
+    };
+    return (
+      errorJson?.error?.message ??
+      errorJson?.error?.status ??
+      JSON.stringify(errorJson)
+    );
+  } catch {
+    return (await upstream.text().catch(() => "")).trim();
+  }
+}
+
 export const generateDebate = httpAction(async (_ctx, request) => {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -207,14 +235,6 @@ export const generateDebate = httpAction(async (_ctx, request) => {
 
   if (request.method !== "POST") {
     return jsonResponse(405, { error: "Method not allowed. Use POST." });
-  }
-
-  const gatewayKey = process.env.VLY_INTEGRATION_KEY;
-  if (!gatewayKey) {
-    return jsonResponse(500, {
-      error:
-        "VLY_INTEGRATION_KEY is not configured. It is injected automatically on project creation — check the project Keys/API keys tab.",
-    });
   }
 
   let body: {
@@ -252,10 +272,10 @@ export const generateDebate = httpAction(async (_ctx, request) => {
   if (!(mode in MODE_INSTRUCTIONS)) {
     return jsonResponse(400, { error: `Unknown mode: ${mode}` });
   }
-  if (!(committee in ["un", "loksabha", "aippm"])) {
+  if (!COMMITTEES.includes(committee as (typeof COMMITTEES)[number])) {
     return jsonResponse(400, { error: `Unknown committee: ${committee}` });
   }
-  if (!(skill in ["beginner", "veteran"])) {
+  if (!SKILLS.includes(skill as (typeof SKILLS)[number])) {
     return jsonResponse(400, { error: `Unknown skill: ${skill}` });
   }
 
@@ -269,13 +289,6 @@ export const generateDebate = httpAction(async (_ctx, request) => {
     "Respond with only the requested content — no preamble, no commentary, no markdown headers.",
   ].join("\n\n");
 
-  // -------------------------------------------------------------------------
-  // RAW fetch() to Freebuff's native built-in gateway — the same endpoint the
-  // `@vly-ai/integrations` SDK hits under the hood. OpenAI-compatible chat
-  // completions payload, streamed.
-  // -------------------------------------------------------------------------
-  const endpoint = `${gatewayBase()}/chat/completions`;
-
   const payload = {
     model,
     messages: [
@@ -286,50 +299,124 @@ export const generateDebate = httpAction(async (_ctx, request) => {
     temperature: 0.7,
   };
 
+  // -------------------------------------------------------------------------
+  // Provider selection.
+  //   1. Freebuff's native built-in gateway (no key needed — deployment token
+  //      injected automatically). This is the requested route.
+  //   2. If the gateway rejects the deployment token (platform provisioning
+  //      issue) and a DEEPSEEK_API_KEY is configured, fall back to DeepSeek's
+  //      OFFICIAL API — same model, same payload, same streaming.
+  // -------------------------------------------------------------------------
+  const gatewayKey = process.env.VLY_INTEGRATION_KEY;
+  const deepseekKey = process.env.DEEPSEEK_API_KEY;
+
+  let provider: "gateway" | "deepseek-api";
+  let endpoint: string;
+  let authToken: string;
+  if (gatewayKey) {
+    provider = "gateway";
+    endpoint = `${gatewayBase()}/chat/completions`;
+    authToken = gatewayKey;
+  } else if (deepseekKey) {
+    provider = "deepseek-api";
+    endpoint = `${DEEPSEEK_API_BASE}/chat/completions`;
+    authToken = deepseekKey;
+  } else {
+    // NOTE: errors are returned with a 4xx status on purpose — the hosting
+    // edge masks 5xx response bodies, so a 5xx would swallow this message.
+    return jsonResponse(400, {
+      error:
+        "No AI provider is configured. The Freebuff gateway token (VLY_INTEGRATION_KEY) is missing — add a DEEPSEEK_API_KEY in the project Keys/API keys tab as an alternative.",
+    });
+  }
+
   let upstream: Response;
   try {
     upstream = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${gatewayKey}`,
+        Authorization: `Bearer ${authToken}`,
       },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(25000),
     });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unknown network error";
-    return jsonResponse(502, {
-      error: `Gateway network request failed: ${message}`,
+    return jsonResponse(400, {
+      error: `[${provider}] network request failed: ${message}`,
       model,
     });
   }
 
-  // Error safety net: surface the gateway's exact error message verbatim on
+  // Error safety net: surface the provider's exact error message verbatim on
   // the dashboard console — never a generic 404 block.
   if (!upstream.ok) {
-    let detail = "";
-    try {
-      const errorJson = await upstream.json();
-      const error = errorJson as {
-        error?: { message?: string; status?: string };
-      };
-      detail =
-        error?.error?.message ??
-        error?.error?.status ??
-        JSON.stringify(errorJson);
-    } catch {
-      detail = (await upstream.text().catch(() => "")).trim();
+    const detail = await extractUpstreamError(upstream);
+
+    // Automatic fallback: gateway rejected the deployment token, but an
+    // official DeepSeek API key is available — retry against DeepSeek.
+    if (
+      provider === "gateway" &&
+      deepseekKey &&
+      (upstream.status === 401 || upstream.status === 403)
+    ) {
+      const fallbackEndpoint = `${DEEPSEEK_API_BASE}/chat/completions`;
+      let fallback: Response;
+      try {
+        fallback = await fetch(fallbackEndpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${deepseekKey}`,
+          },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(25000),
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unknown network error";
+        return jsonResponse(400, {
+          error: `[deepseek-api] network request failed: ${message}`,
+          model,
+        });
+      }
+      if (!fallback.ok) {
+        const fallbackDetail = await extractUpstreamError(fallback);
+        return jsonResponse(400, {
+          error: `DeepSeek request failed (${fallback.status}): ${fallbackDetail}`,
+          model,
+        });
+      }
+      if (!fallback.body) {
+        return jsonResponse(400, {
+          error: "The DeepSeek API returned an empty stream.",
+          model,
+        });
+      }
+      return new Response(sseToTextStream(fallback.body), {
+        headers: {
+          ...CORS_HEADERS,
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-cache",
+        },
+      });
     }
-    return jsonResponse(502, {
-      error: `DeepSeek request failed (${upstream.status}): ${detail}`,
+
+    const hint =
+      provider === "gateway"
+        ? " The Freebuff gateway rejected the deployment token (platform provisioning issue). Add a DEEPSEEK_API_KEY in the project Keys/API keys tab to use the official DeepSeek-V3 API instead."
+        : "";
+    return jsonResponse(400, {
+      error: `DeepSeek request failed (${upstream.status}): ${detail}${hint}`,
       model,
     });
   }
 
   if (!upstream.body) {
-    return jsonResponse(502, {
-      error: "The gateway returned an empty stream.",
+    return jsonResponse(400, {
+      error: `The provider (${provider}) returned an empty stream.`,
       model,
     });
   }
