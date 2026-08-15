@@ -132,7 +132,7 @@ function Auth({ redirectAfterAuth }: AuthProps = {}) {
               <>
                 <CardHeader className="text-center">
                   <p className="eyebrow text-muted-foreground">
-                    MUN Apex AI
+                    JessQuest AI
                   </p>
                   <CardTitle className="mt-1.5 font-serif text-2xl tracking-tight">
                     Sign in to the floor

@@ -58,7 +58,7 @@ export function BrandMark({ className }: { className?: string }) {
         fontWeight="700"
         fill="var(--foreground)"
       >
-        M
+        J
       </text>
     </svg>
   );
@@ -83,7 +83,7 @@ export function Wordmark({
             compact ? "text-[13px]" : "text-[15px]",
           )}
         >
-          MUN APEX AI
+          JessQuest AI
         </span>
         {subtitle && (
           <span className="mt-1 text-[9.5px] font-medium uppercase tracking-[0.24em] text-muted-foreground">

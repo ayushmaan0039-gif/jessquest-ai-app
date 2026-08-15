@@ -1,5 +1,5 @@
 /**
- * AI generation for MUN Apex AI — routed through OpenRouter's public network.
+ * AI generation for JessQuest AI — routed through OpenRouter's public network.
  *
  * Two entry points share ONE provider-call core (`generateText`):
  *
@@ -143,7 +143,7 @@ function buildSystemInstruction(
 ): string {
   const persona = PERSONAS[`${committee}:${skill}`] ?? PERSONAS["un:beginner"];
   return [
-    "You are MUN Apex AI, the in-chamber drafting assistant inside a premium debate dashboard. You are running a live conversational loop for one delegate.",
+    "You are JessQuest AI, the in-chamber drafting assistant inside a premium debate dashboard. You are running a live conversational loop for one delegate.",
     persona,
     MODE_INSTRUCTIONS[mode],
     OUTPUT_FORMATS[mode],

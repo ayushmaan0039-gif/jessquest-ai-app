@@ -65,7 +65,7 @@ export function DashboardHeader({
         <Link
           to="/"
           className="shrink-0 transition-opacity hover:opacity-80"
-          aria-label="MUN Apex AI — home"
+          aria-label="JessQuest AI — home"
         >
           <span className="hidden md:block">
             <Wordmark compact />

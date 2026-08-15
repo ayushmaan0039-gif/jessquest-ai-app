@@ -96,7 +96,7 @@ export default function Landing() {
               Apex intelligence for the modern delegate
             </p>
             <h1 className="masthead mt-3 text-4xl leading-none tracking-[0.18em] text-foreground sm:text-6xl md:text-7xl">
-              MUN APEX AI
+              JessQuest AI
             </h1>
             <p className="mx-auto mt-4 max-w-xl font-serif text-base italic text-muted-foreground sm:text-lg">
               Debate with precision. Draft with authority. Rebut with evidence.
@@ -152,7 +152,7 @@ export default function Landing() {
             </h2>
 
             <p className="mt-5 max-w-xl text-[15px] leading-7 text-muted-foreground">
-              MUN Apex AI is a premium dashboard for delegates and parliament
+              JessQuest AI is a premium dashboard for delegates and parliament
               speakers. Choose your committee framework and skill level, then
               work the floor: track interventions live, draw from a vault of
               points of information, and draft resolutions like a rapporteur.
@@ -455,7 +455,7 @@ export default function Landing() {
             </nav>
           </div>
           <div className="mt-8 flex flex-col items-center justify-between gap-2 border-t border-border pt-5 text-[10px] uppercase tracking-[0.18em] text-muted-foreground sm:flex-row">
-            <span>© 2026 MUN Apex AI — Delegate Intelligence</span>
+            <span>© 2026 JessQuest AI — Delegate Intelligence</span>
             <span>Set in the Papery editorial system</span>
           </div>
         </div>
