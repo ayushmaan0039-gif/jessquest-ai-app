@@ -1,6 +1,7 @@
 {
   "name": "vite-template",
   "private": true,
+  "homepage": "http://jessquestai.in",
   "version": "0.0.0",
   "type": "module",
   "scripts": {
